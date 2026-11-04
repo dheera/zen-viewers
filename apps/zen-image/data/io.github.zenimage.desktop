@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Zen Image
+Comment=View, zoom and rotate images
+Exec=zen-image %F
+Icon=io.github.zenimage
+Terminal=false
+Categories=Graphics;Viewer;
+MimeType=image/png;image/jpeg;image/webp;image/tiff;image/gif;image/bmp;image/svg+xml;
+StartupNotify=true

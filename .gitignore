@@ -1,0 +1,9 @@
+/build/
+/dist/
+*.o
+*.a
+__pycache__/
+/apps/zen-pdf/zen-pdf
+/apps/zen-image/zen-image
+/apps/zen-markdown/zen-markdown
+/apps/*/dist/

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Zen Markdown
+Comment=Read Markdown in a quiet window
+Exec=zen-markdown %f
+Icon=io.github.zenviewers.Markdown
+Terminal=false
+Categories=Office;Viewer;
+MimeType=text/markdown;text/x-markdown;
+StartupNotify=true
+StartupWMClass=zen-markdown

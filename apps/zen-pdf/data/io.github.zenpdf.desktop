@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Zen PDF
+Comment=A quiet space for your documents
+Exec=zen-pdf %f
+Icon=io.github.zenpdf
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/pdf;
+StartupNotify=true
+StartupWMClass=zen-pdf
