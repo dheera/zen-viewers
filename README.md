@@ -1,6 +1,10 @@
 # Zen Viewers
 
-Small native Linux viewers with rounded, borderless windows and controls that appear when the pointer moves.
+**Minimalist, modern viewers for Linux.**
+
+Zen Viewers brings the quiet, focused feel of tablet apps to the Linux desktop. Open a PDF, image or Markdown file and let the content fill the window, with rounded corners and floating controls that fade away when you settle in.
+
+Built in C with a shared GTK 4 shell, each viewer stays small and focused. Separate renderer packages let you install just the viewers you need.
 
 | App | Current functionality |
 | --- | --- |
@@ -9,6 +13,16 @@ Small native Linux viewers with rounded, borderless windows and controls that ap
 | **zen-markdown** | Native CommonMark reading, selectable text, links, font sizing and source view |
 
 The three apps share the same GTK 4 window shell. Each renderer is a separate app with its own dependencies. The shared C code is linked into each executable as a small static library; there is no additional shared-library package or background service.
+
+## Screenshots
+
+Actual app windows with their hover controls visible. Click an image for the full-size screenshot.
+
+| Zen PDF | Zen Image | Zen Markdown |
+| --- | --- | --- |
+| [![Zen PDF showing a selected word and floating page controls](previews/pdf-hover.png)](previews/pdf-hover.png) | [![Zen Image showing a landscape and floating view controls](previews/image-hover.png)](previews/image-hover.png) | [![Zen Markdown showing formatted text and floating reading controls](previews/markdown-hover.png)](previews/markdown-hover.png) |
+
+With the controls hidden: [PDF](previews/pdf-quiet.png) · [Image](previews/image-quiet.png) · [Markdown](previews/markdown-quiet.png).
 
 ## Build
 
