@@ -20,6 +20,6 @@ After loading, call `zen_window_set_title` and `zen_window_set_ready`. The suppl
 
 Use `zen_window_set_pointer_claim_func` when content needs a primary-button press in the top area, such as selecting a PDF glyph or Markdown text. Window edges remain available for resizing. Ctrl+primary presses are left to the content for forced panning.
 
-`zen-3d` uses a `GtkGLArea` with an independent model importer and camera. A future video viewer can provide a media paintable and timeline. Keep renderer and codec dependencies in their respective app packages.
+`zen-3d` uses a `GtkGLArea` with an independent model importer and camera. `zen-video` provides a libmpv canvas and playback timeline. `zen-books` provides a reflowable text view and comic page canvas. Keep renderer and codec dependencies in their respective app packages.
 
 The repository root builds `build/libzen-ui.a` once and links it into all selected apps. This keeps the dependency model to GTK plus each app's own content libraries.

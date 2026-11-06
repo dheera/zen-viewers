@@ -4,11 +4,11 @@ set -euo pipefail
 root=$(cd -- "$(dirname -- "$0")/.." && pwd)
 version=$(cat "$root/VERSION")-1
 arch=$(dpkg --print-architecture)
-apps=(zen-pdf zen-image zen-markdown zen-3d)
+apps=(zen-pdf zen-image zen-markdown zen-3d zen-video zen-books)
 meta=true
 if (( $# )); then
-    if [[ $# != 2 || $1 != --app || ! $2 =~ ^zen-(pdf|image|markdown|3d)$ ]]; then
-        echo "Usage: $0 [--app zen-pdf|zen-image|zen-markdown|zen-3d]" >&2; exit 2
+    if [[ $# != 2 || $1 != --app || ! $2 =~ ^zen-(pdf|image|markdown|3d|video|books)$ ]]; then
+        echo "Usage: $0 [--app zen-pdf|zen-image|zen-markdown|zen-3d|zen-video|zen-books]" >&2; exit 2
     fi
     apps=("$2"); meta=false
 fi
@@ -71,7 +71,7 @@ CONTROL
     # Older GdkPixbuf releases use a separate loader for WebP images.
     case $app in
         zen-image) echo 'Recommends: webp-pixbuf-loader' >> "$stage/DEBIAN/control" ;;
-        zen-markdown) echo 'Recommends: fonts-noto-core' >> "$stage/DEBIAN/control" ;;
+        zen-markdown|zen-books) echo 'Recommends: fonts-noto-core' >> "$stage/DEBIAN/control" ;;
     esac
     (cd "$stage"; find usr -type f -print0 | LC_ALL=C sort -z | xargs -0 md5sum > DEBIAN/md5sums)
     dpkg-deb --root-owner-group --build "$stage" "$tmp/packages/${app}_${version}_${pkg_arch}.deb"
@@ -81,6 +81,11 @@ for app in "${apps[@]}"; do
     zen-pdf)      source/build/$app --self-test; summary="Borderless PDF reader with smooth scrolling and selectable text" ;;
     zen-image)    source/build/$app --version; summary="Borderless image viewer with folder navigation and metadata" ;;
     zen-markdown) source/build/$app --self-test; summary="Borderless Markdown reader with formatted tables and selectable text" ;;
+    zen-video)    source/build/$app --version; summary="Borderless video player with native playback controls" ;;
+    zen-books)
+        source/build/$app --version
+        if [[ -e $root/examples/above-the-fog.epub ]]; then source/build/$app --inspect "$root/examples/above-the-fog.epub" >/dev/null; fi
+        summary="Borderless EPUB and CBZ reader with selectable text and chapter navigation" ;;
     zen-3d)
         source/build/$app --version
         if [[ -e $root/examples/trefoil.glb ]]; then source/build/$app --inspect "$root/examples/trefoil.glb" >/dev/null; fi
@@ -95,8 +100,8 @@ for app in "${apps[@]}"; do
     finish_package "$app" "$arch" "$depends" "$summary" "$root/apps/$app/README.md"
 done
 if $meta; then
-    finish_package zen-viewers all "zen-pdf (= $version), zen-image (= $version), zen-markdown (= $version), zen-3d (= $version)" \
-        "Install the Zen PDF, image, Markdown and 3D viewers" "$root/README.md"
+    finish_package zen-viewers all "zen-pdf (= $version), zen-image (= $version), zen-markdown (= $version), zen-3d (= $version), zen-video (= $version), zen-books (= $version)" \
+        "Install the Zen PDF, image, Markdown, 3D, video and book viewers" "$root/README.md"
 fi
 mkdir -p "$root/dist"
 install -m644 "$tmp"/packages/*.deb "$root/dist/"

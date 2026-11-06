@@ -1,9 +1,9 @@
-%{!?zen_viewers_version:%global zen_viewers_version 0.4.0}
+%{!?zen_viewers_version:%global zen_viewers_version 0.5.0}
 %global cmark_gfm_version 0.29.0.gfm.13
 Name:           zen-viewers
 Version:        %{zen_viewers_version}
 Release:        1%{?dist}
-Summary:        Native PDF, image, Markdown and 3D viewers
+Summary:        Native PDF, image, Markdown, 3D, video and book viewers
 License:        GPL-3.0-or-later
 Source0:        %{name}-%{version}.tar.gz
 # https://codeload.github.com/github/cmark-gfm/tar.gz/refs/tags/0.29.0.gfm.13
@@ -12,18 +12,24 @@ BuildRequires:  gcc
 BuildRequires:  gcc-c++
 BuildRequires:  make
 BuildRequires:  cmake
+BuildRequires:  python3
 BuildRequires:  pkgconfig(gtk4) >= 4.6
 BuildRequires:  pkgconfig(poppler-glib)
 BuildRequires:  pkgconfig(libexif)
 BuildRequires:  pkgconfig(epoxy)
 BuildRequires:  pkgconfig(assimp)
+BuildRequires:  pkgconfig(mpv)
+BuildRequires:  pkgconfig(libarchive)
+BuildRequires:  pkgconfig(libxml-2.0)
 Requires:       zen-pdf = %{version}-%{release}
 Requires:       zen-image = %{version}-%{release}
 Requires:       zen-markdown = %{version}-%{release}
 Requires:       zen-3d = %{version}-%{release}
+Requires:       zen-video = %{version}-%{release}
+Requires:       zen-books = %{version}-%{release}
 
 %description
-A metapackage that installs all four native GTK viewers.
+A metapackage that installs all six native GTK viewers.
 
 %package -n zen-pdf
 Summary:        Borderless PDF reader with smooth scrolling and selectable text
@@ -46,6 +52,16 @@ A cmark-gfm reader with native formatted tables, selectable text and source mode
 Summary:        Borderless 3D model viewer with interactive orbit and zoom
 %description -n zen-3d
 A GTK and OpenGL viewer for local 3D models, using Assimp for file import.
+
+%package -n zen-video
+Summary:        Borderless video player with native playback controls
+%description -n zen-video
+A GTK and libmpv video player with seek, volume and fullscreen controls.
+
+%package -n zen-books
+Summary:        Borderless EPUB and CBZ reader with chapter navigation
+%description -n zen-books
+A native GTK EPUB and CBZ reader with selectable text and chapter navigation.
 
 %prep
 %setup -q
@@ -100,3 +116,17 @@ cmake --build cmark-build -- %{?_smp_mflags}
 %{_bindir}/zen-3d
 %{_datadir}/applications/io.github.zenviewers.ThreeD.desktop
 %{_datadir}/icons/hicolor/scalable/apps/io.github.zenviewers.ThreeD.svg
+
+%files -n zen-video
+%license LICENSE
+%doc apps/zen-video/README.md
+%{_bindir}/zen-video
+%{_datadir}/applications/io.github.zenviewers.Video.desktop
+%{_datadir}/icons/hicolor/scalable/apps/io.github.zenviewers.Video.svg
+
+%files -n zen-books
+%license LICENSE
+%doc apps/zen-books/README.md
+%{_bindir}/zen-books
+%{_datadir}/applications/io.github.zenviewers.Books.desktop
+%{_datadir}/icons/hicolor/scalable/apps/io.github.zenviewers.Books.svg

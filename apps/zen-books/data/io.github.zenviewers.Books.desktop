@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Zen Books
+GenericName=Book and Comic Reader
+Comment=Read EPUB books and CBZ comics in a focused window
+Exec=zen-books %F
+Icon=io.github.zenviewers.Books
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/epub+zip;application/vnd.comicbook+zip;application/x-cbz;
+StartupNotify=true

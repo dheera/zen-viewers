@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Zen Video
+GenericName=Video Player
+Comment=Watch local videos in a focused window
+Exec=zen-video %F
+Icon=io.github.zenviewers.Video
+Terminal=false
+Categories=AudioVideo;Video;Player;
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/mpeg;video/ogg;video/mp2t;application/ogg;
+StartupNotify=true
