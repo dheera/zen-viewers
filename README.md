@@ -9,7 +9,7 @@ Built in C with a shared GTK 4 shell, each viewer stays small and focused. Separ
 | App | Current functionality |
 | --- | --- |
 | **zen-pdf** | Fit-width pages, smooth vertical scrolling, animated page turns, an optional page sidebar, zoom and text selection |
-| **zen-image** | Folder navigation, optional image details, fit and actual size, pan, zoom and view rotation |
+| **zen-image** | Folder navigation, fast camera RAW previews, image details, fit, pan, zoom and rotation |
 | **zen-markdown** | Serif reading view, formatted tables, selectable text, links, font sizing and source view |
 | **zen-3d** | GPU mesh and point-cloud viewing, orbit, pan, zoom, view presets and optional model details |
 | **zen-video** | Local playback, hover timeline, seeking, frame stepping, volume and subtitles |
@@ -36,7 +36,7 @@ With the controls hidden. [PDF](previews/pdf-quiet.png) · [Image](previews/imag
 These commands build all six apps on Ubuntu 22.04 or later.
 
 ```sh
-sudo apt install build-essential pkg-config libgtk-4-dev libpoppler-glib-dev libcmark-gfm-dev libcmark-gfm-extensions-dev libexif-dev libepoxy-dev libassimp-dev libmpv-dev libarchive-dev libxml2-dev
+sudo apt install build-essential pkg-config libgtk-4-dev libpoppler-glib-dev libcmark-gfm-dev libcmark-gfm-extensions-dev libexif-dev libraw-dev libepoxy-dev libassimp-dev libmpv-dev libarchive-dev libxml2-dev
 make
 ```
 
@@ -56,7 +56,7 @@ Running an app without a filename opens its start screen. All apps support **Ctr
 Each app also has an individual build target.
 
 ```sh
-make zen-image       # GTK and system image loaders, optional libexif
+make zen-image       # GTK and system image loaders, optional LibRaw and libexif
 make zen-pdf         # GTK + Poppler
 make zen-markdown    # GTK + cmark-gfm
 make zen-3d          # GTK + libepoxy + Assimp

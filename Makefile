@@ -17,9 +17,15 @@ VIDEO_LIBS ?= $(shell pkg-config --libs mpv epoxy)
 BOOKS_CFLAGS = $(shell pkg-config --cflags libarchive libxml-2.0)
 BOOKS_LIBS = $(shell pkg-config --libs libarchive libxml-2.0)
 IMAGE_EXIF ?= $(shell pkg-config --exists libexif && echo yes)
+IMAGE_RAW ?= $(shell pkg-config --exists 'libraw_r >= 0.20' && echo yes || echo no)
+IMAGE_RAW_MIME = image/x-canon-cr2;image/x-canon-cr3;image/x-sony-arw;image/x-adobe-dng;image/x-nikon-nef;image/x-fuji-raf;image/x-olympus-orf;image/x-panasonic-rw2;image/x-pentax-pef;
 ifeq ($(IMAGE_EXIF),yes)
 IMAGE_CFLAGS = $(shell pkg-config --cflags libexif) -DHAVE_LIBEXIF
 IMAGE_LIBS = $(shell pkg-config --libs libexif)
+endif
+ifeq ($(IMAGE_RAW),yes)
+IMAGE_CFLAGS += $(shell pkg-config --cflags libraw_r) -DHAVE_LIBRAW
+IMAGE_LIBS += $(shell pkg-config --libs libraw_r)
 endif
 BINARIES = $(addprefix build/,$(APPS))
 COMMON = common/zen-ui.c common/zen-ui.h
@@ -41,7 +47,13 @@ build/libzen-ui.a: build/zen-ui.o
 	$(AR) rcs $@ $<
 build/zen-pdf: apps/zen-pdf/src/main.c apps/zen-pdf/src/selection.inc apps/zen-pdf/src/view.inc build/libzen-ui.a common/zen-ui.h VERSION
 	$(CC) $(CPPFLAGS) $(VERSION_FLAG) $(GTK_CFLAGS) $(PDF_CFLAGS) $(CFLAGS) -Icommon $< build/libzen-ui.a -o $@ $(LDFLAGS) $(GTK_LIBS) $(PDF_LIBS) -lm
-build/zen-image: apps/zen-image/main.c apps/zen-image/thumbnail.h build/libzen-ui.a common/zen-ui.h VERSION
+# Keep feature switches effective even when a differently configured binary exists.
+build/image-features: FORCE_IMAGE_FEATURES | build
+	@printf '%s\n' 'exif=$(if $(filter yes,$(IMAGE_EXIF)),yes,no)' 'raw=$(if $(filter yes,$(IMAGE_RAW)),yes,no)' > $@.tmp
+	@cmp -s $@.tmp $@ || mv $@.tmp $@
+	@rm -f $@.tmp
+FORCE_IMAGE_FEATURES:
+build/zen-image: apps/zen-image/main.c apps/zen-image/thumbnail.h apps/zen-image/raw.h build/image-features build/libzen-ui.a common/zen-ui.h VERSION
 	$(CC) $(CPPFLAGS) $(VERSION_FLAG) $(GTK_CFLAGS) $(IMAGE_CFLAGS) $(CFLAGS) -Icommon $< build/libzen-ui.a -o $@ $(LDFLAGS) $(GTK_LIBS) $(IMAGE_LIBS) -lm
 build/zen-markdown: apps/zen-markdown/src/main.c apps/zen-markdown/src/document.c apps/zen-markdown/src/document.h build/libzen-ui.a common/zen-ui.h VERSION
 	$(CC) $(CPPFLAGS) $(VERSION_FLAG) $(GTK_CFLAGS) $(MARKDOWN_CFLAGS) $(CFLAGS) -Icommon apps/zen-markdown/src/main.c apps/zen-markdown/src/document.c build/libzen-ui.a -o $@ $(LDFLAGS) $(GTK_LIBS) $(MARKDOWN_LIBS) -lm
@@ -77,12 +89,20 @@ check-ui: all
 install: $(BINARIES)
 	@set -e; for app in $(APPS); do \
 	  install -Dm755 build/$$app "$(DESTDIR)$(PREFIX)/bin/$$app"; \
-	  for file in apps/$$app/data/*.desktop; do install -Dm644 "$$file" "$(DESTDIR)$(PREFIX)/share/applications/$$(basename "$$file")"; done; \
+	  for file in apps/$$app/data/*.desktop; do \
+	    desktop="$(DESTDIR)$(PREFIX)/share/applications/$$(basename "$$file")"; \
+	    install -Dm644 "$$file" "$$desktop"; \
+	    if [ "$$app" = zen-image ] && [ "$(IMAGE_RAW)" = yes ]; then sed -i '/^MimeType=/s|$$|$(IMAGE_RAW_MIME)|' "$$desktop"; fi; \
+	  done; \
 	  for file in apps/$$app/data/*.svg; do install -Dm644 "$$file" "$(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/$$(basename "$$file")"; done; \
+	  if [ "$$app" = zen-image ] && [ "$(IMAGE_RAW)" = yes ]; then \
+	    install -Dm644 apps/zen-image/data/io.github.zenimage-raw.xml "$(DESTDIR)$(PREFIX)/share/mime/packages/io.github.zenimage-raw.xml"; \
+	  fi; \
 	done
 uninstall:
 	@set -e; for app in $(APPS); do \
 	  rm -f "$(DESTDIR)$(PREFIX)/bin/$$app"; \
+	  if [ "$$app" = zen-image ]; then rm -f "$(DESTDIR)$(PREFIX)/share/mime/packages/io.github.zenimage-raw.xml"; fi; \
 	  for file in apps/$$app/data/*.desktop; do rm -f "$(DESTDIR)$(PREFIX)/share/applications/$$(basename "$$file")"; done; \
 	  for file in apps/$$app/data/*.svg; do rm -f "$(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/$$(basename "$$file")"; done; \
 	done
@@ -93,4 +113,4 @@ rpm:
 	./scripts/build-rpm.sh
 clean:
 	rm -rf build
-.PHONY: all zen-pdf zen-image zen-markdown zen-3d zen-video zen-books check check-ui install uninstall deb rpm clean
+.PHONY: all zen-pdf zen-image zen-markdown zen-3d zen-video zen-books check check-ui install uninstall deb rpm clean FORCE_IMAGE_FEATURES

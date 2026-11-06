@@ -1,5 +1,12 @@
 %{!?zen_viewers_version:%global zen_viewers_version 0.5.0}
 %global cmark_gfm_version 0.29.0.gfm.13
+# Downstream packagers can use rpmbuild --without raw for a lighter image viewer.
+%bcond_without raw
+%if %{with raw}
+%global image_raw yes
+%else
+%global image_raw no
+%endif
 Name:           zen-viewers
 Version:        %{zen_viewers_version}
 Release:        1%{?dist}
@@ -16,6 +23,9 @@ BuildRequires:  python3
 BuildRequires:  pkgconfig(gtk4) >= 4.6
 BuildRequires:  pkgconfig(poppler-glib)
 BuildRequires:  pkgconfig(libexif)
+%if %{with raw}
+BuildRequires:  pkgconfig(libraw_r) >= 0.20
+%endif
 BuildRequires:  pkgconfig(epoxy)
 BuildRequires:  pkgconfig(assimp)
 BuildRequires:  pkgconfig(mpv)
@@ -75,15 +85,15 @@ cmake -S cmark-gfm-%{cmark_gfm_version} -B cmark-build \
     -DCMARK_SHARED=OFF -DCMARK_STATIC=ON -DCMARK_TESTS=OFF \
     -DCMAKE_C_FLAGS="$CFLAGS"
 cmake --build cmark-build -- %{?_smp_mflags}
-%make_build CFLAGS="%{build_cflags}" LDFLAGS="%{build_ldflags}" \
+%make_build CFLAGS="%{build_cflags}" LDFLAGS="%{build_ldflags}" IMAGE_RAW=%{image_raw} \
     MARKDOWN_CFLAGS="-Icmark-gfm-%{cmark_gfm_version}/src -Icmark-gfm-%{cmark_gfm_version}/extensions -Icmark-build/src -Icmark-build/extensions -DCMARK_GFM_STATIC_DEFINE -DCMARK_GFM_EXTENSIONS_STATIC_DEFINE" \
     MARKDOWN_LIBS="cmark-build/extensions/libcmark-gfm-extensions.a cmark-build/src/libcmark-gfm.a"
 
 %check
-%{__make} check
+%{__make} check IMAGE_RAW=%{image_raw}
 
 %install
-%{__make} install PREFIX=%{_prefix} DESTDIR=%{buildroot}
+%{__make} install PREFIX=%{_prefix} DESTDIR=%{buildroot} IMAGE_RAW=%{image_raw}
 
 %files
 %license LICENSE
@@ -101,6 +111,9 @@ cmake --build cmark-build -- %{?_smp_mflags}
 %{_bindir}/zen-image
 %{_datadir}/applications/io.github.zenimage.desktop
 %{_datadir}/icons/hicolor/scalable/apps/io.github.zenimage.svg
+%if %{with raw}
+%{_datadir}/mime/packages/io.github.zenimage-raw.xml
+%endif
 
 %files -n zen-markdown
 %license LICENSE

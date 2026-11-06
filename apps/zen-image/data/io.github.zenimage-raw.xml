@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <!-- Canonical type missing from older shared-mime-info releases. -->
+  <mime-type type="image/x-canon-cr3">
+    <comment>Canon CR3 raw image</comment>
+    <sub-class-of type="image/x-dcraw"/>
+    <glob pattern="*.cr3"/>
+  </mime-type>
+</mime-info>

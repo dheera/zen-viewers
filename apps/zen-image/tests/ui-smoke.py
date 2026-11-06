@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from PIL import Image, ImageDraw, ImageGrab, PngImagePlugin
+from PIL import Image, ImageDraw, ImageGrab, PngImagePlugin, TiffImagePlugin
 
 
 def x(*args):
@@ -99,6 +99,28 @@ GFileInputStream *g_file_read(GFile *file, GCancellable *cancel, GError **error)
     subprocess.run([*shlex.split(os.environ.get("CC", "cc")), "-shared", "-fPIC", "-std=c11", "-O2",
                     "-Wall", "-Wextra", source, "-o", library, *flags, "-ldl"], check=True)
     return library
+
+
+def make_dng(path):
+    # A tiny uncompressed RGGB sensor image with no embedded JPEG preview.
+    width, height = 192, 128
+    ifd = TiffImagePlugin.ImageFileDirectory_v2()
+    tags = {
+        262: (3, 32803),                       # CFA photometric interpretation
+        271: (2, "Zen"), 272: (2, "Test DNG"),   # camera make and model
+        33421: (3, (2, 2)), 33422: (1, b"\0\1\1\2"),  # CFA layout
+        50706: (1, b"\1\4\0\0"), 50707: (1, b"\1\1\0\0"),  # DNG versions
+        50708: (2, "Zen Test Camera"),
+        50714: (3, 0), 50717: (4, 4095),         # black and white levels
+        50721: (10, (1, 0, 0, 0, 1, 0, 0, 0, 1)),  # color matrix
+        50728: (5, (1, 1, 1)), 50778: (3, 21),   # neutral and illuminant
+    }
+    for tag, (kind, value) in tags.items():
+        ifd.tagtype[tag] = kind
+        ifd[tag] = value
+    samples = [200 + x * 1300 // width + y * 500 // height for y in range(height) for x in range(width)]
+    data = struct.pack(f"<{len(samples)}H", *samples)
+    Image.frombytes("I;16", (width, height), data).save(path, format="TIFF", tiffinfo=ifd)
 
 
 def run(binary, tmp):
@@ -273,6 +295,29 @@ def run(binary, tmp):
                 load(image)
                 wait(lambda: named(image.name) and color(300,200,blue), f"Decode {extension}")
         print("PASS additional installed image loaders", flush=True)
+
+        if "camera raw previews" in installed:
+            raw = tmp / "raw"
+            raw.mkdir()
+            start = raw / "shot1.png"
+            Image.new("RGB", (300,200), red).save(start)
+            make_dng(raw / "shot2.DNG")
+            (raw / "shot3.ARW").write_bytes(b"broken RAW data")
+            Image.new("RGB", (300,200), blue).save(raw / "shot4.png")
+            load(start)
+            wait(lambda: named(start.name) and color(300,200,red), "Open mixed RAW folder")
+            x("key", "Right")
+            wait(lambda: named("shot2.DNG") and not color(300,200,ambient) and not color(300,200,red),
+                 "Render a RAW image without an embedded preview")
+            x("key", "i", "ctrl+a", "ctrl+c")
+            raw_info = metadata()
+            assert all(field in raw_info for field in ("Camera RAW (DNG)", "Quick RAW preview",
+                       "96 × 64 pixels", "192 × 128 pixels", "Test DNG")), raw_info
+            x("key", "Escape", "Right")
+            wait(lambda: named("shot4.png") and color(300,200,blue), "Skip damaged RAW file")
+            x("key", "Left")
+            wait(lambda: named("shot2.DNG"), "Navigate back to the decoded RAW image")
+            print("PASS quick DNG preview, RAW metadata and mixed-folder navigation", flush=True)
 
         # Observe real opens so this verifies reuse, not a machine-speed budget.
         hot = tmp / "hot-cache"

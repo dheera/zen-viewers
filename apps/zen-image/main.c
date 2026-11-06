@@ -206,6 +206,26 @@ static void metadata_field(GString *text, const char *name, const char *value) {
     char *utf8 = g_utf8_make_valid(value, -1);
     g_string_append_printf(text, "%s\n%s\n\n", name, utf8); g_free(utf8);
 }
+static GString *image_metadata(GFile *file, const char *format, int width, int height,
+                               GFileInfo *info, guint64 size, gboolean alpha) {
+    GString *text = g_string_new(NULL);
+    g_autofree char *name = g_file_get_basename(file);
+    metadata_field(text, "File", name);
+    metadata_field(text, "Format", format);
+    g_autofree char *dimensions = g_strdup_printf("%d × %d pixels", width, height);
+    metadata_field(text, "Dimensions", dimensions);
+    g_autofree char *file_size = g_format_size_full(size, G_FORMAT_SIZE_LONG_FORMAT);
+    metadata_field(text, "File size", file_size);
+    metadata_field(text, "Transparency", alpha ? "Yes" : "No");
+    if (info && g_file_info_has_attribute(info, G_FILE_ATTRIBUTE_TIME_MODIFIED)) {
+        g_autoptr(GDateTime) time = g_date_time_new_from_unix_local((gint64)g_file_info_get_attribute_uint64(info, G_FILE_ATTRIBUTE_TIME_MODIFIED));
+        if (time) {
+            g_autofree char *formatted = g_date_time_format(time, "%Y-%m-%d %H:%M:%S");
+            metadata_field(text, "Modified", formatted);
+        }
+    }
+    return text;
+}
 #ifdef HAVE_LIBEXIF
 static void exif_field(GString *text, ExifData *exif, ExifIfd ifd, ExifTag tag, const char *title) {
     ExifEntry *entry = exif_content_get_entry(exif->ifd[ifd], tag);
@@ -258,6 +278,39 @@ static void prepare_textures(Decoded *result, GdkPixbuf *pixels, int fit_edge) {
     }
 }
 static void publish_thumbnail(GTask *task, GdkPixbuf *pixels);
+#ifdef HAVE_LIBRAW
+#include "raw.h"
+
+static void decode_raw(GTask *task, ImageLoad *load, const char *extension, GCancellable *cancel) {
+    GError *error = NULL;
+    g_autoptr(GFileInfo) info = g_file_query_info(load->file, G_FILE_ATTRIBUTE_STANDARD_TYPE ","
+        G_FILE_ATTRIBUTE_STANDARD_SIZE "," G_FILE_ATTRIBUTE_TIME_MODIFIED, G_FILE_QUERY_INFO_NONE, cancel, &error);
+    RawInfo raw = {0};
+    g_autoptr(GdkPixbuf) pixels = info ? raw_decode(task, load->file, info, &raw, cancel, &error) : NULL;
+    if (!pixels) { g_task_return_error(task, error); return; }
+
+    Decoded *result = g_new0(Decoded, 1);
+    result->width = gdk_pixbuf_get_width(pixels);
+    result->height = gdk_pixbuf_get_height(pixels);
+    g_autofree char *suffix = g_ascii_strup(extension, -1);
+    g_autofree char *format = g_strdup_printf("Camera RAW (%s)", suffix);
+    GString *text = image_metadata(load->file, format, result->width, result->height,
+        info, (guint64)g_file_info_get_size(info), FALSE);
+    metadata_field(text, "Rendering", raw.embedded ? "Embedded camera preview" : "Quick RAW preview");
+    if (raw.width && raw.height) {
+        g_autofree char *dimensions = g_strdup_printf("%d × %d pixels", raw.width, raw.height);
+        metadata_field(text, "Sensor image", dimensions);
+    }
+    metadata_field(text, "Camera make", raw.make);
+    metadata_field(text, "Camera model", raw.model);
+    g_autofree char *location = g_file_get_parse_name(load->file);
+    metadata_field(text, "Location", location);
+    result->metadata = g_string_free(text, FALSE);
+    prepare_textures(result, pixels, load->fit_edge);
+    g_task_return_pointer(task, result, decoded_free);
+}
+#endif
+
 static void decode(GTask *task, gpointer source, gpointer data, GCancellable *cancel) {
     (void)source;
     ImageLoad *load = data;
@@ -266,6 +319,11 @@ static void decode(GTask *task, gpointer source, gpointer data, GCancellable *ca
         publish_thumbnail(task, thumbnail);
         g_object_unref(thumbnail);
     }
+#ifdef HAVE_LIBRAW
+    g_autofree char *basename = g_file_get_basename(load->file);
+    const char *extension = basename ? raw_extension(basename) : NULL;
+    if (extension) { decode_raw(task, load, extension, cancel); return; }
+#endif
     GError *error = NULL;
     GFileInputStream *in = g_file_read(load->file, cancel, &error);
     if (!in) { g_task_return_error(task, error); return; }
@@ -310,24 +368,10 @@ static void decode(GTask *task, gpointer source, gpointer data, GCancellable *ca
     }
     if (!error) g_cancellable_set_error_if_cancelled(cancel, &error);
     if (!error) {
-        GString *text = g_string_new(NULL);
-        char *name = g_file_get_basename(load->file);
-        metadata_field(text, "File", name); g_free(name);
         GdkPixbufFormat *format = gdk_pixbuf_loader_get_format(loader);
-        char *description = format ? gdk_pixbuf_format_get_description(format) : NULL;
-        metadata_field(text, "Format", description); g_free(description);
-        char *dimensions = g_strdup_printf("%d × %d pixels", result->width, result->height);
-        metadata_field(text, "Dimensions", dimensions); g_free(dimensions);
-        char *size = g_format_size_full(info ? (guint64)g_file_info_get_size(info) : total, G_FORMAT_SIZE_LONG_FORMAT);
-        metadata_field(text, "File size", size); g_free(size);
-        metadata_field(text, "Transparency", gdk_pixbuf_get_has_alpha(pixels) ? "Yes" : "No");
-        if (info && g_file_info_has_attribute(info, G_FILE_ATTRIBUTE_TIME_MODIFIED)) {
-            GDateTime *time = g_date_time_new_from_unix_local((gint64)g_file_info_get_attribute_uint64(info, G_FILE_ATTRIBUTE_TIME_MODIFIED));
-            if (time) {
-                char *formatted = g_date_time_format(time, "%Y-%m-%d %H:%M:%S");
-                metadata_field(text, "Modified", formatted); g_free(formatted); g_date_time_unref(time);
-            }
-        }
+        g_autofree char *description = format ? gdk_pixbuf_format_get_description(format) : NULL;
+        GString *text = image_metadata(load->file, description, result->width, result->height,
+            info, info ? (guint64)g_file_info_get_size(info) : total, gdk_pixbuf_get_has_alpha(pixels));
         if (gdk_pixbuf_get_width(pixels) != result->width || gdk_pixbuf_get_height(pixels) != result->height) {
             char *preview = g_strdup_printf("%d × %d pixels", gdk_pixbuf_get_width(pixels), gdk_pixbuf_get_height(pixels));
             metadata_field(text, "Preview resolution", preview); g_free(preview);
@@ -364,6 +408,9 @@ static GHashTable *image_extensions(void) {
         for (int i = 0; names[i]; i++) g_hash_table_add(extensions, g_ascii_strdown(names[i], -1));
         g_strfreev(names);
     }
+#ifdef HAVE_LIBRAW
+    for (guint i = 0; raw_extensions[i]; i++) g_hash_table_add(extensions, g_strdup(raw_extensions[i]));
+#endif
     g_slist_free(formats); return extensions;
 }
 static void scan_directory(GTask *task, gpointer source, gpointer data, GCancellable *cancel) {
@@ -946,7 +993,12 @@ int main(int argc, char **argv) {
             g_print("%s (%s)\n", name, joined);
             g_free(name); g_free(joined); g_strfreev(extensions);
         }
-        g_slist_free(formats); return 0;
+        g_slist_free(formats);
+#ifdef HAVE_LIBRAW
+        g_autofree char *extensions = g_strjoinv(", ", (char **)raw_extensions);
+        g_print("Camera RAW previews (%s)\n", extensions);
+#endif
+        return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "--version")) { g_print("zen-image " ZEN_VERSION "\n"); return 0; }
     if (argc == 2 && !strcmp(argv[1], "--help")) {
