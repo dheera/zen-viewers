@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Zen 3D
+GenericName=3D Model Viewer
+Comment=Explore 3D models with orbit, pan and zoom
+Exec=zen-3d %F
+Icon=io.github.zenviewers.ThreeD
+Terminal=false
+Categories=Graphics;3DGraphics;Viewer;
+MimeType=model/gltf+json;model/gltf-binary;model/obj;model/stl;model/vnd.collada+xml;
+Keywords=3D;model;mesh;OBJ;STL;glTF;
+StartupNotify=true

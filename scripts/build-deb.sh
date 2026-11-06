@@ -4,11 +4,11 @@ set -euo pipefail
 root=$(cd -- "$(dirname -- "$0")/.." && pwd)
 version=$(cat "$root/VERSION")-1
 arch=$(dpkg --print-architecture)
-apps=(zen-pdf zen-image zen-markdown)
+apps=(zen-pdf zen-image zen-markdown zen-3d)
 meta=true
 if (( $# )); then
-    if [[ $# != 2 || $1 != --app || ! $2 =~ ^zen-(pdf|image|markdown)$ ]]; then
-        echo "Usage: $0 [--app zen-pdf|zen-image|zen-markdown]" >&2; exit 2
+    if [[ $# != 2 || $1 != --app || ! $2 =~ ^zen-(pdf|image|markdown|3d)$ ]]; then
+        echo "Usage: $0 [--app zen-pdf|zen-image|zen-markdown|zen-3d]" >&2; exit 2
     fi
     apps=("$2"); meta=false
 fi
@@ -81,6 +81,10 @@ for app in "${apps[@]}"; do
     zen-pdf)      source/build/$app --self-test; summary="Borderless PDF reader with smooth scrolling and selectable text" ;;
     zen-image)    source/build/$app --version; summary="Borderless image viewer with folder navigation and metadata" ;;
     zen-markdown) source/build/$app --self-test; summary="Borderless Markdown reader with formatted tables and selectable text" ;;
+    zen-3d)
+        source/build/$app --version
+        if [[ -e $root/examples/trefoil.glb ]]; then source/build/$app --inspect "$root/examples/trefoil.glb" >/dev/null; fi
+        summary="Borderless 3D model viewer with interactive orbit and zoom" ;;
     esac
     mkdir -p "debian/$app/DEBIAN"
     make -C source install APPS="$app" PREFIX=/usr DESTDIR="$tmp/debian/$app"
@@ -91,8 +95,8 @@ for app in "${apps[@]}"; do
     finish_package "$app" "$arch" "$depends" "$summary" "$root/apps/$app/README.md"
 done
 if $meta; then
-    finish_package zen-viewers all "zen-pdf (= $version), zen-image (= $version), zen-markdown (= $version)" \
-        "Install the Zen PDF, image and Markdown viewers" "$root/README.md"
+    finish_package zen-viewers all "zen-pdf (= $version), zen-image (= $version), zen-markdown (= $version), zen-3d (= $version)" \
+        "Install the Zen PDF, image, Markdown and 3D viewers" "$root/README.md"
 fi
 mkdir -p "$root/dist"
 install -m644 "$tmp"/packages/*.deb "$root/dist/"

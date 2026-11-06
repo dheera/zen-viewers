@@ -1,9 +1,9 @@
-%{!?zen_viewers_version:%global zen_viewers_version 0.3.0}
+%{!?zen_viewers_version:%global zen_viewers_version 0.4.0}
 %global cmark_gfm_version 0.29.0.gfm.13
 Name:           zen-viewers
 Version:        %{zen_viewers_version}
 Release:        1%{?dist}
-Summary:        Native PDF, image and Markdown viewers
+Summary:        Native PDF, image, Markdown and 3D viewers
 License:        GPL-3.0-or-later
 Source0:        %{name}-%{version}.tar.gz
 # https://codeload.github.com/github/cmark-gfm/tar.gz/refs/tags/0.29.0.gfm.13
@@ -15,12 +15,15 @@ BuildRequires:  cmake
 BuildRequires:  pkgconfig(gtk4) >= 4.6
 BuildRequires:  pkgconfig(poppler-glib)
 BuildRequires:  pkgconfig(libexif)
+BuildRequires:  pkgconfig(epoxy)
+BuildRequires:  pkgconfig(assimp)
 Requires:       zen-pdf = %{version}-%{release}
 Requires:       zen-image = %{version}-%{release}
 Requires:       zen-markdown = %{version}-%{release}
+Requires:       zen-3d = %{version}-%{release}
 
 %description
-A metapackage that installs all three native GTK readers.
+A metapackage that installs all four native GTK viewers.
 
 %package -n zen-pdf
 Summary:        Borderless PDF reader with smooth scrolling and selectable text
@@ -38,6 +41,11 @@ License:        GPL-3.0-or-later AND BSD-2-Clause AND MIT
 Provides:       bundled(cmark-gfm) = %{cmark_gfm_version}
 %description -n zen-markdown
 A cmark-gfm reader with native formatted tables, selectable text and source mode.
+
+%package -n zen-3d
+Summary:        Borderless 3D model viewer with interactive orbit and zoom
+%description -n zen-3d
+A GTK and OpenGL viewer for local 3D models, using Assimp for file import.
 
 %prep
 %setup -q
@@ -85,3 +93,10 @@ cmake --build cmark-build -- %{?_smp_mflags}
 %{_bindir}/zen-markdown
 %{_datadir}/applications/io.github.zenviewers.Markdown.desktop
 %{_datadir}/icons/hicolor/scalable/apps/io.github.zenviewers.Markdown.svg
+
+%files -n zen-3d
+%license LICENSE
+%doc apps/zen-3d/README.md
+%{_bindir}/zen-3d
+%{_datadir}/applications/io.github.zenviewers.ThreeD.desktop
+%{_datadir}/icons/hicolor/scalable/apps/io.github.zenviewers.ThreeD.svg
