@@ -69,15 +69,18 @@ Depends: $depends
 Description: $description
 CONTROL
     # Older GdkPixbuf releases use a separate loader for WebP images.
-    if [[ $app == zen-image ]]; then echo 'Recommends: webp-pixbuf-loader' >> "$stage/DEBIAN/control"; fi
+    case $app in
+        zen-image) echo 'Recommends: webp-pixbuf-loader' >> "$stage/DEBIAN/control" ;;
+        zen-markdown) echo 'Recommends: fonts-noto-core' >> "$stage/DEBIAN/control" ;;
+    esac
     (cd "$stage"; find usr -type f -print0 | LC_ALL=C sort -z | xargs -0 md5sum > DEBIAN/md5sums)
     dpkg-deb --root-owner-group --build "$stage" "$tmp/packages/${app}_${version}_${pkg_arch}.deb"
 }
 for app in "${apps[@]}"; do
     case $app in
-    zen-pdf)      source/build/$app --self-test; summary="Borderless PDF reader with selectable text" ;;
-    zen-image)    source/build/$app --version; summary="Borderless image viewer with fit and zoom controls" ;;
-    zen-markdown) source/build/$app --self-test; summary="Borderless CommonMark reader with selectable text" ;;
+    zen-pdf)      source/build/$app --self-test; summary="Borderless PDF reader with smooth scrolling and selectable text" ;;
+    zen-image)    source/build/$app --version; summary="Borderless image viewer with folder navigation and metadata" ;;
+    zen-markdown) source/build/$app --self-test; summary="Borderless Markdown reader with formatted tables and selectable text" ;;
     esac
     mkdir -p "debian/$app/DEBIAN"
     make -C source install APPS="$app" PREFIX=/usr DESTDIR="$tmp/debian/$app"

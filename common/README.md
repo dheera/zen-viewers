@@ -1,8 +1,8 @@
 # Shared viewer shell
 
-`zen-ui.h` is the boundary between the small GTK window shell and an individual viewer. It accepts an ordinary `GtkWidget`; it does not prescribe a page model, renderer, or document format.
+`zen-ui.h` is the boundary between the small GTK window shell and an individual viewer. It accepts an ordinary `GtkWidget` for content.
 
-The shell owns rounded borderless windows, edge resize and top-area move gestures, hover overlays, the open/fullscreen/close controls, a bottom controls slot, native file choosing, file drops, global shortcuts, a start screen and transient notices. Filename labels are converted to display-safe UTF-8. Callbacks keep file handling and content gestures in the app.
+The shell owns rounded borderless windows, edge resize and top-area move gestures, independent top and bottom hover overlays, open/fullscreen/close controls, a bottom controls slot, native file choosing, file drops, global shortcuts, a start screen and transient notices. Filename labels are converted to display-safe UTF-8. Callbacks keep file handling and content gestures in the app. The shell leaves window clipping to Niri and accepts the `ZEN_CORNERS` override described in the [root README](../README.md#window-corners).
 
 The app owns parsing/decoding, worker cancellation, document/cache state, content rendering, selection, content-specific controls and keyboard commands. Selection and editing behavior belongs to the content widget. A PDF page number is not a shared concept that video or 3D viewers must implement.
 
@@ -22,4 +22,4 @@ Use `zen_window_set_pointer_claim_func` when content needs a primary-button pres
 
 Future `zen-3d` can provide a `GtkGLArea` with its own model loader/camera controls; `zen-video` can provide a media-framework paintable and timeline. Neither should add its renderer or codec dependencies to this library. Keep the app packages independently installable.
 
-The repository root builds `build/libzen-ui.a` once and links it into all selected apps. This avoids introducing a separately versioned runtime UI library while the internal API is evolving. It also keeps the existing lightweight dependency model: GTK plus each app's own content library.
+The repository root builds `build/libzen-ui.a` once and links it into all selected apps. This keeps the dependency model to GTK plus each app's own content libraries.

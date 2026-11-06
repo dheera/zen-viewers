@@ -8,11 +8,11 @@ The first light reached the upper slopes while the valley was still blue. From t
 
 ## On the way back
 
-1. Pause at the switchback for the [view across the basin](basin.png).
-2. Compare the contour lines in the [field notebook](field-notes.pdf).
-3. Record a bearing before the light changes.
-
-The sketch uses three broad bands of color. [Jump to the palette](#palette) for the values.
+| Stop | Note | Time |
+| :--- | :--- | ---: |
+| Switchback | [View across the basin](basin.png) | 06:40 |
+| Western ridge | [Field notebook](field-notes.pdf) | 07:10 |
+| Trailhead | Record the last bearing | 07:50 |
 
 ## Palette
 

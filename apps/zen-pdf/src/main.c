@@ -8,22 +8,26 @@
 #include <errno.h>
 #include <string.h>
 
-#define VERSION "0.2.0"
 #define CACHE_SIZE 3
 #define PIXEL_BUDGET (8 * 1024 * 1024)
 
 typedef struct { double w, h; } Size;
+typedef struct { char *title; int page, depth; } OutlineEntry;
 typedef struct {
     gint refs;
     PopplerDocument *pdf;
     GMutex pdf_lock; /* Only workers enter Poppler; a document has one caller at a time. */
     GArray *sizes;
+    GPtrArray *outline; /* Loaded only when the sidebar is requested. */
+    gboolean outline_loading, outline_loaded;
     char *name;
 } Document;
 typedef struct {
     cairo_surface_t *surface;
     int page, pixels;
     guint64 age;
+    GdkTexture *texture;
+    GdkRGBA edge[4]; /* top, right, bottom, left; sampled once per raster */
 } Raster;
 typedef struct PageText PageText;
 typedef struct {
@@ -39,6 +43,10 @@ typedef struct {
     GtkWindow *window;
     GtkWidget *canvas, *prev, *next, *counter, *jump, *zoom_label, *fit_button;
     GtkWidget *password_dialog;
+    GtkWidget *content, *sidebar, *sidebar_list, *sidebar_title;
+    GtkStringList *page_names;
+    GtkSingleSelection *page_selection;
+    gboolean sidebar_visible;
     Document *doc;
     Raster cache[CACHE_SIZE];
     Selection selection;
@@ -51,6 +59,15 @@ typedef struct {
     double zoom, offset, offset_x, drag_x, drag_y, swipe;
     gint64 last_flip;
     int page, width, height, failed_page, failed_pixels;
+    int travel_direction;
+    guint motion_tick;
+    gint64 tick_time, flip_start;
+    double target_offset, elastic, flip_progress;
+    int flip_axis, flip_sign;
+    gboolean flipping;
+    GdkTexture *outgoing;
+    GdkRGBA outgoing_edge[4];
+    double outgoing_x, outgoing_y, outgoing_w, outgoing_h;
 } App;
 typedef struct {
     Document *doc;
@@ -64,10 +81,20 @@ static void refresh(App *a);
 static void reveal(App *a);
 static void open_file(App *a, GFile *file, const char *password);
 static void go_page(App *a, int page);
+static void view_navigate(App *a, int page, int axis, gboolean at_bottom);
+static void view_scroll(App *a, double amount);
+static void view_stop(App *a);
+static void view_start(App *a);
+static void sidebar_reset(App *a);
+static void sidebar_load(App *a);
+static void sidebar_update(App *a);
+static void sidebar_toggle(App *a);
 
+static void outline_entry_free(gpointer data) { OutlineEntry *entry=data; g_free(entry->title); g_free(entry); }
 static Document *document_ref(Document *d) { g_atomic_int_inc(&d->refs); return d; }
 static void document_unref(Document *d) {
     if (d && g_atomic_int_dec_and_test(&d->refs)) {
+        g_clear_pointer(&d->outline,g_ptr_array_unref);
         g_mutex_clear(&d->pdf_lock); g_object_unref(d->pdf); g_array_unref(d->sizes); g_free(d->name); g_free(d);
     }
 }
@@ -136,7 +163,7 @@ static cairo_surface_t *render_page(Document *d, int page, int pixels, GError **
     if (height > 32767 || width * height > PIXEL_BUDGET) {
         g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NO_SPACE, "This page's aspect ratio exceeds the renderer limit."); return NULL;
     }
-    cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_RGB24, width, (int)height);
+    cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, (int)height);
     cairo_t *cr = cairo_create(surface);
     cairo_set_source_rgb(cr, 1, 1, 1); cairo_paint(cr);
     cairo_scale(cr, scale, scale);
@@ -156,6 +183,12 @@ static Layout current_layout(App *a) {
     Layout l = layout_for(g_array_index(a->doc->sizes, Size, a->page), a->width, a->height, a->fit_page, a->zoom, a->offset);
     double range = MAX(0, (l.w - a->width) / 2);
     l.x += CLAMP(a->offset_x, -range, range);
+    l.y += a->elastic;
+    if (a->flipping) {
+        double displacement = a->flip_sign * (1-a->flip_progress);
+        if (a->flip_axis) l.y += displacement * a->height;
+        else l.x += displacement * a->width;
+    }
     return l;
 }
 static void clamp_offsets(App *a) {
@@ -180,8 +213,31 @@ static Raster *cached(App *a, int page, int pixels, gboolean exact) {
     }
     return best;
 }
+static GdkRGBA edge_average(cairo_surface_t *surface, int edge) {
+    int w = cairo_image_surface_get_width(surface), h = cairo_image_surface_get_height(surface);
+    int stride = cairo_image_surface_get_stride(surface);
+    const unsigned char *data = cairo_image_surface_get_data(surface);
+    guint red=0, green=0, blue=0;
+    for (int n=0; n<64; n++) {
+        int x = edge == 1 ? w-1 : edge == 3 ? 0 : (int)((gint64)(w-1)*n/63);
+        int y = edge == 0 ? 0 : edge == 2 ? h-1 : (int)((gint64)(h-1)*n/63);
+        guint32 pixel; memcpy(&pixel, data + y*stride + 4*x, sizeof pixel);
+        red += (pixel >> 16) & 255; green += (pixel >> 8) & 255; blue += pixel & 255;
+    }
+    return (GdkRGBA){red/(64.f*255),green/(64.f*255),blue/(64.f*255),1};
+}
+static void prepare_raster(Raster *r) {
+    int h = cairo_image_surface_get_height(r->surface), w = cairo_image_surface_get_width(r->surface);
+    int stride = cairo_image_surface_get_stride(r->surface);
+    GBytes *bytes = g_bytes_new_with_free_func(cairo_image_surface_get_data(r->surface),
+        (gsize)stride*h, (GDestroyNotify)cairo_surface_destroy, cairo_surface_reference(r->surface));
+    r->texture = gdk_memory_texture_new(w,h,GDK_MEMORY_DEFAULT,bytes,stride);
+    g_bytes_unref(bytes);
+    for (int edge=0; edge<4; edge++) r->edge[edge] = edge_average(r->surface,edge);
+}
 static void clear_cache(App *a) {
     for (int i = 0; i < CACHE_SIZE; i++) {
+        g_clear_object(&a->cache[i].texture);
         if (a->cache[i].surface) cairo_surface_destroy(a->cache[i].surface);
         a->cache[i] = (Raster){0};
     }
@@ -214,13 +270,17 @@ static void render_done(GObject *source, GAsyncResult *result, gpointer data) {
                 if (!a->cache[i].surface) { slot = i; break; }
                 if (a->cache[i].age < a->cache[slot].age) slot = i;
             }
+            g_clear_object(&a->cache[slot].texture);
             if (a->cache[slot].surface) cairo_surface_destroy(a->cache[slot].surface);
-            a->cache[slot] = (Raster){surface, j->page, j->pixels, ++a->age};
+            a->cache[slot] = (Raster){.surface=surface, .page=j->page, .pixels=j->pixels, .age=++a->age};
+            prepare_raster(&a->cache[slot]);
             surface = NULL;
         } else {
             a->failed_page = j->page; a->failed_pixels = j->pixels;
-            notice(a, error ? error->message : "Could not render this page.");
+            if (j->page == a->page) notice(a, error ? error->message : "Could not render this page.");
         }
+        if (a->flipping) view_start(a);
+        if (a->sidebar_visible) sidebar_load(a);
         gtk_widget_queue_draw(a->canvas);
     }
     if (surface) cairo_surface_destroy(surface);
@@ -231,12 +291,21 @@ static void render_done(GObject *source, GAsyncResult *result, gpointer data) {
 static gboolean start_render(gpointer data) {
     App *a = data; a->render_timer = 0;
     if (a->closed || !a->doc || a->rendering || a->width < 1) return G_SOURCE_REMOVE;
+    int target = a->page;
     int pixels = desired_pixels(a);
     Raster *r = cached(a, a->page, pixels, TRUE);
-    if (r) { r->age = ++a->age; return G_SOURCE_REMOVE; }
-    if (a->failed_page == a->page && a->failed_pixels == pixels) return G_SOURCE_REMOVE;
+    if (r) {
+        r->age = ++a->age;
+        target += a->travel_direction ? a->travel_direction : 1;
+        if (target < 0 || target >= (int)a->doc->sizes->len) return G_SOURCE_REMOVE;
+        Size size = g_array_index(a->doc->sizes, Size, target);
+        Layout neighbor = layout_for(size,a->width,a->height,a->fit_page,a->zoom,0);
+        pixels = raster_width(size,ceil(neighbor.w*gtk_widget_get_scale_factor(a->canvas)));
+        if (cached(a,target,pixels,TRUE)) return G_SOURCE_REMOVE;
+    }
+    if (a->failed_page == target && a->failed_pixels == pixels) return G_SOURCE_REMOVE;
     RenderJob *j = g_new0(RenderJob, 1);
-    j->doc = document_ref(a->doc); j->page = a->page; j->pixels = pixels;
+    j->doc = document_ref(a->doc); j->page = target; j->pixels = pixels;
     a->rendering = TRUE;
     GTask *task = g_task_new(a->window, NULL, render_done, a);
     g_task_set_task_data(task, j, render_job_free);
@@ -251,34 +320,10 @@ static void request_render(App *a) {
 }
 static gboolean update_controls(gpointer data) {
     App *a = data; a->layout_timer = 0;
-    if (!a->closed) gtk_widget_set_visible(a->zoom_label, a->width >= 430);
+    if (!a->closed) gtk_widget_set_visible(a->zoom_label, a->width >= 480);
     return G_SOURCE_REMOVE;
 }
-static void draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer data) {
-    (void)area; App *a = data;
-    if (width != a->width || height != a->height) {
-        a->width = width; a->height = height;
-        if (!a->layout_timer) a->layout_timer = g_idle_add(update_controls, a);
-        if (a->doc) { clamp_offsets(a); request_render(a); }
-    }
-    cairo_set_source_rgb(cr, .09, .105, .10); cairo_paint(cr);
-    if (!a->doc) return;
-    Layout l = current_layout(a);
-    cairo_rectangle(cr, l.x, l.y, l.w, l.h);
-    cairo_set_source_rgb(cr, 1, 1, 1); cairo_fill(cr);
-    Raster *r = cached(a, a->page, desired_pixels(a), FALSE);
-    if (!r) return;
-    cairo_save(cr); cairo_rectangle(cr, l.x, l.y, l.w, l.h); cairo_clip(cr);
-    cairo_translate(cr, l.x, l.y);
-    double sw = cairo_image_surface_get_width(r->surface);
-    /* Use the same scale on both axes; the last raster row can contain padding. */
-    cairo_scale(cr, l.w / sw, l.w / sw);
-    cairo_set_source_surface(cr, r->surface, 0, 0);
-    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
-    cairo_paint(cr); cairo_restore(cr);
-    selection_draw(a, cr, l);
-    selection_schedule(a);
-}
+#include "view.inc"
 
 static void reveal(App *a) { zen_window_reveal_controls(a->shell); }
 static void refresh(App *a) {
@@ -297,17 +342,12 @@ static void refresh(App *a) {
     char *zoom = g_strdup_printf("%s · %.0f%%", a->fit_page ? "Page" : "Width", a->zoom * 100);
     gtk_label_set_text(GTK_LABEL(a->zoom_label), zoom); g_free(zoom);
     gtk_widget_set_tooltip_text(a->fit_button, a->fit_page ? "Fit width (W)" : "Fit page (P)");
+    sidebar_update(a);
     gtk_widget_queue_draw(a->canvas); request_render(a);
 }
-static void go_page(App *a, int page) {
-    if (!a->doc) return;
-    page = CLAMP(page, 0, (int)a->doc->sizes->len - 1);
-    if (page == a->page) return;
-    selection_reset(a);
-    a->page = page; a->offset = 0; a->offset_x = 0;
-    a->failed_page = -1; refresh(a);
-}
+static void go_page(App *a, int page) { view_navigate(a,page,0,FALSE); }
 static void set_zoom(App *a, double zoom) {
+    view_stop(a);
     double before = current_layout(a).scale;
     a->zoom = CLAMP(zoom, .5, 4.0);
     double after = current_layout(a).scale;
@@ -315,11 +355,12 @@ static void set_zoom(App *a, double zoom) {
         a->offset = MAX(0, (a->offset + a->height / 2.0) * after / before - a->height / 2.0);
         a->offset_x *= after / before;
     }
-    clamp_offsets(a);
+    clamp_offsets(a); a->target_offset=a->offset;
     refresh(a);
 }
 static void set_fit(App *a, gboolean page) {
-    a->fit_page = page; a->zoom = 1; a->offset = 0; a->offset_x = 0; refresh(a);
+    view_stop(a);
+    a->fit_page = page; a->zoom = 1; a->offset = 0; a->offset_x = 0; a->target_offset=0; refresh(a);
 }
 static void prev_clicked(GtkButton *b, gpointer data) { (void)b; App *a = data; go_page(a, a->page - 1); }
 static void next_clicked(GtkButton *b, gpointer data) { (void)b; App *a = data; go_page(a, a->page + 1); }
@@ -339,10 +380,12 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint key, guint 
     /* Shared shortcuts must reach the shell before plain W is treated as fit-width. */
     if (ctrl && (key == GDK_KEY_w || key == GDK_KEY_W || key == GDK_KEY_q ||
                  key == GDK_KEY_Q || key == GDK_KEY_o || key == GDK_KEY_O)) return FALSE;
+    if (key == GDK_KEY_F9 || (ctrl && (key == GDK_KEY_b || key == GDK_KEY_B))) { sidebar_toggle(a); return TRUE; }
     if (key == GDK_KEY_Escape) {
         if (a->selection.end != a->selection.start || a->selection.want_all) {
             selection_clear(a); return TRUE;
         }
+        if (a->sidebar_visible) { sidebar_toggle(a); return TRUE; }
         if (gtk_window_is_fullscreen(a->window)) gtk_window_unfullscreen(a->window);
         gtk_widget_grab_focus(a->canvas); reveal(a); return TRUE;
     }
@@ -351,6 +394,7 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint key, guint 
     }
     GtkWidget *focus = gtk_window_get_focus(a->window);
     if (focus && GTK_IS_EDITABLE(focus)) return FALSE;
+    if (focus && (focus == a->sidebar_list || gtk_widget_is_ancestor(focus,a->sidebar_list)) && !ctrl) return FALSE;
     if (ctrl && (key == GDK_KEY_c || key == GDK_KEY_C || key == GDK_KEY_Insert || key == GDK_KEY_KP_Insert)) {
         selection_copy(a); return TRUE;
     }
@@ -365,9 +409,9 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint key, guint 
     case GDK_KEY_Left: case GDK_KEY_Page_Up: go_page(a, a->page - 1); return TRUE;
     case GDK_KEY_Home: go_page(a, 0); return TRUE;
     case GDK_KEY_End: if (a->doc) go_page(a, a->doc->sizes->len - 1); return TRUE;
-    case GDK_KEY_Down: a->offset += 64; break;
-    case GDK_KEY_Up: a->offset -= 64; break;
-    case GDK_KEY_space: a->offset += (state & GDK_SHIFT_MASK ? -1 : 1) * a->height * .85; break;
+    case GDK_KEY_Down: view_scroll(a,64); return TRUE;
+    case GDK_KEY_Up: view_scroll(a,-64); return TRUE;
+    case GDK_KEY_space: view_scroll(a,(state & GDK_SHIFT_MASK ? -1 : 1) * a->height * .85); return TRUE;
     case GDK_KEY_f: zen_window_toggle_fullscreen(a->shell); return TRUE;
     case GDK_KEY_w: set_fit(a, FALSE); return TRUE;
     case GDK_KEY_p: set_fit(a, TRUE); return TRUE;
@@ -398,8 +442,7 @@ static gboolean scroll(GtkEventControllerScroll *controller, double dx, double d
             a->last_flip = now; a->swipe = 0; a->swipe_handled = a->scroll_gesture;
         }
     } else {
-        a->offset += dy * 48; clamp_offsets(a);
-        gtk_widget_queue_draw(a->canvas);
+        view_scroll(a,dy*64);
     }
     return TRUE;
 }
@@ -411,6 +454,7 @@ static void scroll_end(GtkEventControllerScroll *c, gpointer data) {
 }
 static void drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data) {
     (void)x; App *a = data;
+    view_stop(a);
     a->force_pan = force_pan(GTK_GESTURE_SINGLE(gesture));
     if (a->force_pan) a->selection.dragging = FALSE;
     if (y < 72 && !a->selection.dragging && !a->force_pan && !gtk_window_is_fullscreen(a->window)) {
@@ -424,12 +468,18 @@ static void drag_update(GtkGestureDrag *gesture, double x, double y, gpointer da
     if (a->selection.dragging) {
         selection_drag_to(a, a->selection.press_x + x, a->selection.press_y + y); return;
     }
-    a->offset_x = a->drag_x + x; a->offset = a->drag_y - y; clamp_offsets(a);
+    a->offset_x = a->drag_x + x; a->offset = a->drag_y - y;
+    double raw = a->offset; clamp_offsets(a); a->target_offset = a->offset;
+    a->elastic = animations_enabled(a) ? rubber_offset(a->offset-raw) : 0;
     gtk_widget_queue_draw(a->canvas);
 }
 static void drag_end(GtkGestureDrag *gesture, double x, double y, gpointer data) {
     (void)gesture; App *a = data;
     if (a->selection.dragging) { selection_release(a); return; }
+    double excess = a->offset-(a->drag_y-y);
+    if (fabs(excess) > 80 && fabs(y) > fabs(x)) {
+        view_navigate(a,a->page+(excess<0?1:-1),1,excess>0);
+    } else view_start(a);
     if (!a->force_pan && current_layout(a).w <= a->width + 1 && fabs(x) > 80 && fabs(x) > fabs(y) * 1.5) {
         go_page(a, a->page + (x < 0 ? 1 : -1));
     }
@@ -439,6 +489,7 @@ static void drag_end(GtkGestureDrag *gesture, double x, double y, gpointer data)
  * glyphs there to the canvas so headers are selectable like any other text. */
 static gboolean claim_text(double x, double y, gpointer data) {
     App *a = data;
+    if (a->sidebar_visible && x >= 10 && x < 206 && y >= 76 && y < a->height-76) return TRUE;
     return a->selection.dragging || selection_hit(a, x, y, FALSE) >= 0;
 }
 static void motion(GtkEventControllerMotion *c, double x, double y, gpointer data) {
@@ -450,6 +501,7 @@ static void pressed(GtkGestureClick *gesture, int n, double x, double y, gpointe
     App *a = data;
     GdkEvent *event = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(gesture));
     if (!event || force_pan(GTK_GESTURE_SINGLE(gesture))) return;
+    view_stop(a);
     gtk_widget_grab_focus(a->canvas);
     GdkDevice *device = gdk_event_get_device(event);
     if (device && gdk_device_get_source(device) != GDK_SOURCE_TOUCHSCREEN && selection_press(a, n, x, y)) return;
@@ -503,9 +555,9 @@ static void open_done(GObject *source, GAsyncResult *result, gpointer data) {
     if (!a->closed && j->serial == a->open_serial) {
         g_clear_object(&a->opening);
         if (d) {
-            selection_reset(a); clear_cache(a); document_unref(a->doc); a->doc = d; d = NULL;
+            view_stop(a); selection_reset(a); clear_cache(a); document_unref(a->doc); a->doc = d; d = NULL;
             a->page = 0; a->zoom = 1; a->offset = 0; a->offset_x = 0; a->fit_page = FALSE;
-            a->failed_page = -1;
+            a->target_offset=0; a->failed_page = -1; sidebar_reset(a);
             zen_window_clear_notice(a->shell);
             zen_window_set_title(a->shell, a->doc->name);
             zen_window_set_ready(a->shell, TRUE);
@@ -535,6 +587,7 @@ static void open_from_shell(ZenWindow *shell, GFile *file, gpointer data) {
 }
 static void cleanup_sources(App *a) {
     selection_stop_sources(a);
+    if (a->motion_tick) { gtk_widget_remove_tick_callback(a->canvas,a->motion_tick); a->motion_tick=0; }
     if (a->layout_timer) { g_source_remove(a->layout_timer); a->layout_timer = 0; }
     if (a->render_timer) { g_source_remove(a->render_timer); a->render_timer = 0; }
 }
@@ -545,6 +598,7 @@ static gboolean close_request(GtkWindow *window, gpointer data) {
 }
 static void app_free(gpointer data) {
     App *a = data; cleanup_sources(a); page_text_free(a->selection.text); clear_cache(a); document_unref(a->doc);
+    g_clear_object(&a->outgoing); g_clear_object(&a->page_names); g_clear_object(&a->page_selection);
     g_clear_object(&a->opening); g_object_unref(a->application); g_free(a);
 }
 static App *new_window(GtkApplication *application) {
@@ -559,14 +613,15 @@ static App *new_window(GtkApplication *application) {
     const char *patterns[] = {"*.pdf", "*.PDF", NULL};
     zen_window_add_file_filter(a->shell, "PDF documents", types, patterns);
     zen_window_set_empty_text(a->shell, "A little room to read.", "Drop a PDF here, or open a document.");
-    a->canvas = gtk_drawing_area_new(); gtk_widget_set_hexpand(a->canvas, TRUE); gtk_widget_set_vexpand(a->canvas, TRUE);
+    a->canvas = pdf_canvas_new(a); gtk_widget_set_hexpand(a->canvas, TRUE); gtk_widget_set_vexpand(a->canvas, TRUE);
     gtk_widget_set_focusable(a->canvas, TRUE);
     gtk_accessible_update_property(GTK_ACCESSIBLE(a->canvas), GTK_ACCESSIBLE_PROPERTY_LABEL, "PDF page. Drag over text to select it. Control+C copies. Left and right turn pages; up and down scroll.", -1);
-    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(a->canvas), draw, a, NULL);
-    zen_window_set_child(a->shell, a->canvas);
+    make_sidebar(a);
+    zen_window_set_child(a->shell, a->content);
     GtkWidget *bottom = zen_window_get_controls(a->shell);
     a->prev = zen_button_new("go-previous-symbolic", "Previous page (Left)", G_CALLBACK(prev_clicked), a);
     a->next = zen_button_new("go-next-symbolic", "Next page (Right)", G_CALLBACK(next_clicked), a);
+    gtk_box_append(GTK_BOX(bottom), zen_button_new("view-list-symbolic","Contents and pages (Ctrl+B or F9)",G_CALLBACK(sidebar_clicked),a));
     gtk_box_append(GTK_BOX(bottom), a->prev);
     a->jump = gtk_entry_new(); gtk_editable_set_width_chars(GTK_EDITABLE(a->jump), 3); gtk_editable_set_max_width_chars(GTK_EDITABLE(a->jump), 6);
     gtk_entry_set_alignment(GTK_ENTRY(a->jump), 1); gtk_entry_set_input_purpose(GTK_ENTRY(a->jump), GTK_INPUT_PURPOSE_DIGITS);
@@ -635,12 +690,31 @@ static void test_budget(void) {
 }
 static void test_cache(void) {
     App a = {0};
-    a.cache[0] = (Raster){cairo_image_surface_create(CAIRO_FORMAT_RGB24, 1, 1), 0, 600, 1};
-    a.cache[1] = (Raster){cairo_image_surface_create(CAIRO_FORMAT_RGB24, 1, 1), 1, 900, 2};
+    a.cache[0] = (Raster){.surface=cairo_image_surface_create(CAIRO_FORMAT_RGB24, 1, 1), .page=0, .pixels=600, .age=1};
+    a.cache[1] = (Raster){.surface=cairo_image_surface_create(CAIRO_FORMAT_RGB24, 1, 1), .page=1, .pixels=900, .age=2};
     g_assert_true(cached(&a, 0, 600, TRUE) == &a.cache[0]);
     g_assert_null(cached(&a, 1, 600, TRUE));
     g_assert_true(cached(&a, 1, 600, FALSE) == &a.cache[1]);
     g_assert_null(cached(&a, 2, 600, FALSE)); clear_cache(&a);
+}
+static void test_texture_lifetime(void) {
+    App a = {0};
+    Raster *r = &a.cache[0];
+    r->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,2,2);
+    cairo_t *cr = cairo_create(r->surface);
+    cairo_set_source_rgb(cr,.2,.4,.6); cairo_paint(cr); cairo_destroy(cr);
+    cairo_surface_flush(r->surface); prepare_raster(r);
+    for (int edge=0; edge<4; edge++) {
+        g_assert_cmpfloat_with_epsilon(r->edge[edge].red,.2,.005);
+        g_assert_cmpfloat_with_epsilon(r->edge[edge].green,.4,.005);
+        g_assert_cmpfloat_with_epsilon(r->edge[edge].blue,.6,.005);
+    }
+    /* A departing slide can retain a texture after its cache slot is evicted. */
+    GdkTexture *texture = g_object_ref(r->texture);
+    clear_cache(&a);
+    guint32 pixels[4]; gdk_texture_download(texture,(guchar*)pixels,8);
+    for (int i=0; i<4; i++) g_assert_cmphex(pixels[i],==,0xff336699);
+    g_object_unref(texture);
 }
 static int render_cli(int argc, char **argv) {
     if (argc != 6) { g_printerr("Usage: zen-pdf --render FILE OUTPUT.png WIDTH PAGE\n"); return 2; }
@@ -661,11 +735,12 @@ int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--self-test")) {
         g_test_init(&argc, &argv, NULL);
         g_test_add_func("/zen/layout", test_layout); g_test_add_func("/zen/raster-budget", test_budget); g_test_add_func("/zen/cache", test_cache);
+        g_test_add_func("/zen/texture-lifetime", test_texture_lifetime);
         return g_test_run();
     }
     if (argc > 1 && !strcmp(argv[1], "--render")) return render_cli(argc, argv);
     if (argc > 1 && (!strcmp(argv[1], "--version") || !strcmp(argv[1], "--help"))) {
-        g_print("zen-pdf " VERSION "\nUsage: zen-pdf [FILE.pdf …]\nA quiet, borderless PDF reader.\n\nDrag over text to select · Ctrl+C copy · Ctrl+A select this page\nCtrl+O open · Left/Right pages · Up/Down scroll · W fit width · P fit page\n+/− zoom · Ctrl+L go to page · F11 fullscreen · Ctrl+W close\n\n--render FILE OUTPUT.png WIDTH PAGE   Render a page without a display\n--self-test                          Run internal checks\n"); return 0;
+        g_print("zen-pdf " ZEN_VERSION "\nUsage: zen-pdf [FILE.pdf …]\nA quiet, borderless PDF reader.\n\nDrag over text to select · Ctrl+C copy · Ctrl+A select this page\nCtrl+O open · Left/Right pages · Up/Down scroll · Ctrl+B contents and pages\nW fit width · P fit page\n+/− zoom · Ctrl+L go to page · F11 fullscreen · Ctrl+W close\n\n--render FILE OUTPUT.png WIDTH PAGE   Render a page without a display\n--self-test                          Run internal checks\n"); return 0;
     }
     g_set_prgname("zen-pdf"); g_set_application_name("Zen PDF");
     GtkApplication *application = gtk_application_new("io.github.zenpdf", G_APPLICATION_HANDLES_OPEN | G_APPLICATION_NON_UNIQUE);

@@ -6,5 +6,5 @@ Exec=zen-image %F
 Icon=io.github.zenimage
 Terminal=false
 Categories=Graphics;Viewer;
-MimeType=image/png;image/jpeg;image/webp;image/tiff;image/gif;image/bmp;image/svg+xml;
+MimeType=image/png;image/jpeg;image/webp;image/tiff;image/gif;image/bmp;image/svg+xml;image/avif;image/heif;image/heic;image/jxl;image/jp2;image/x-icon;image/vnd.microsoft.icon;image/x-xpixmap;image/x-portable-pixmap;image/x-tga;
 StartupNotify=true

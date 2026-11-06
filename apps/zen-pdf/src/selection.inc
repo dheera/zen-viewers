@@ -240,6 +240,7 @@ static void selection_drag_to(App *a, double x, double y) {
 }
 static void selection_release(App *a) {
     Selection *s = &a->selection; s->dragging = FALSE;
+    a->target_offset = a->offset;
     if (s->scroll_timer) { g_source_remove(s->scroll_timer); s->scroll_timer = 0; }
     set_primary(a);
 }

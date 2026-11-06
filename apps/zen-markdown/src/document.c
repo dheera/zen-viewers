@@ -1,12 +1,15 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "document.h"
-#include <cmark.h>
+#include <cmark-gfm.h>
+#include <cmark-gfm-core-extensions.h>
 #include <string.h>
 
 #define MD_MAX_BYTES (8u * 1024 * 1024)
 #define MAX_NODES 150000u
 #define MAX_DEPTH 96u
 #define MAX_STYLE_SPANS 10000u
+#define MAX_TABLE_CELLS 2048u
+#define MAX_TABLE_COLUMNS 32u
 
 typedef struct {
     MdDocument *doc;
@@ -14,6 +17,7 @@ typedef struct {
     GHashTable *anchor_suffixes;
     int offset;
     guint nodes;
+    guint span_count, cell_count;
     GCancellable *cancel;
     GError **error;
     gboolean failed;
@@ -24,12 +28,28 @@ static void clear_span(gpointer item) {
     g_free(span->url);
 }
 
+static void free_cell(gpointer data) {
+    MdCell *cell = data;
+    g_free(cell->text);
+    g_array_unref(cell->spans);
+    g_free(cell);
+}
+
+static void free_table(gpointer data) {
+    MdTable *table = data;
+    g_free(table->alignments);
+    g_ptr_array_unref(table->cells);
+    g_free(table->tsv);
+    g_free(table);
+}
+
 void md_document_free(MdDocument *doc) {
     if (!doc) return;
     g_free(doc->source);
     g_free(doc->text);
     g_array_unref(doc->spans);
     g_hash_table_unref(doc->anchors);
+    g_ptr_array_unref(doc->tables);
     g_free(doc);
 }
 
@@ -49,7 +69,7 @@ static void line_gap(Builder *b, unsigned int count) {
 
 static void mark(Builder *b, MdStyle style, int start, const char *url) {
     if (b->failed || start == b->offset) return;
-    if (b->doc->spans->len >= MAX_STYLE_SPANS) {
+    if (++b->span_count > MAX_STYLE_SPANS) {
         g_set_error_literal(b->error, G_IO_ERROR, G_IO_ERROR_NO_SPACE, "This Markdown document has too many formatting spans.");
         b->failed = TRUE;
         return;
@@ -87,6 +107,56 @@ static void children(Builder *b, cmark_node *parent, guint depth, guint list_dep
         render(b, n, depth + 1, list_depth, compact);
 }
 
+static void render_table(Builder *b, cmark_node *node, guint depth) {
+    guint columns = cmark_gfm_extensions_get_table_columns(node);
+    if (!columns || columns > MAX_TABLE_COLUMNS) {
+        g_set_error_literal(b->error, G_IO_ERROR, G_IO_ERROR_NO_SPACE,
+            "Tables may contain up to 32 columns.");
+        b->failed = TRUE;
+        return;
+    }
+    line_gap(b, 2);
+    MdTable *table = g_new0(MdTable, 1);
+    table->offset = b->offset;
+    table->columns = columns;
+    table->alignments = g_memdup2(cmark_gfm_extensions_get_table_alignments(node), columns);
+    table->cells = g_ptr_array_new_with_free_func(free_cell);
+    g_ptr_array_add(b->doc->tables, table);
+    GString *tsv = g_string_new(NULL);
+    for (cmark_node *row = cmark_node_first_child(node); row && !b->failed; row = cmark_node_next(row)) {
+        guint col = 0;
+        for (cmark_node *cell = cmark_node_first_child(row); cell && !b->failed; cell = cmark_node_next(cell), col++) {
+            if (++b->cell_count > MAX_TABLE_CELLS) {
+                g_set_error_literal(b->error, G_IO_ERROR, G_IO_ERROR_NO_SPACE,
+                    "This document exceeds the 2,048 table-cell limit.");
+                b->failed = TRUE;
+                break;
+            }
+            MdCell *item = g_new0(MdCell, 1);
+            item->spans = g_array_new(FALSE, FALSE, sizeof(MdSpan));
+            g_array_set_clear_func(item->spans, clear_span);
+            GString *outer = b->out;
+            int offset = b->offset;
+            GArray *spans = b->doc->spans;
+            b->out = g_string_new(NULL);
+            b->offset = 0;
+            b->doc->spans = item->spans;
+            children(b, cell, depth + 2, 0, TRUE);
+            item->text = g_string_free(b->out, FALSE);
+            b->out = outer;
+            b->offset = offset;
+            b->doc->spans = spans;
+            g_ptr_array_add(table->cells, item);
+            if (col) g_string_append_c(tsv, '\t');
+            g_string_append(tsv, item->text);
+        }
+        if (!b->failed) g_string_append_c(tsv, '\n');
+    }
+    table->tsv = g_string_free(tsv, FALSE);
+    append(b, "\xef\xbf\xbc");
+    line_gap(b, 2);
+}
+
 static void render(Builder *b, cmark_node *n, guint depth, guint list_depth, gboolean compact) {
     if (++b->nodes > MAX_NODES || depth > MAX_DEPTH || b->out->len > MD_MAX_BYTES * 2u) {
         g_set_error_literal(b->error, G_IO_ERROR, G_IO_ERROR_NO_SPACE, "This Markdown document is too complex to display.");
@@ -98,6 +168,13 @@ static void render(Builder *b, cmark_node *n, guint depth, guint list_depth, gbo
         return;
     }
     int start = b->offset;
+    const char *kind = cmark_node_get_type_string(n);
+    if (!strcmp(kind, "table")) { render_table(b, n, depth); return; }
+    if (!strcmp(kind, "strikethrough")) {
+        children(b, n, depth, list_depth, compact);
+        mark(b, MD_STRIKE, start, NULL);
+        return;
+    }
     switch (cmark_node_get_type(n)) {
     case CMARK_NODE_DOCUMENT:
     case CMARK_NODE_ITEM:
@@ -181,7 +258,17 @@ MdDocument *md_parse(const char *source, gsize size, GCancellable *cancel, GErro
         return NULL;
     }
     if (size >= 3 && !memcmp(source, "\xef\xbb\xbf", 3)) { source += 3; size -= 3; }
-    cmark_node *root = cmark_parse_document(source, size, CMARK_OPT_DEFAULT);
+    static gsize extensions_ready;
+    if (g_once_init_enter(&extensions_ready)) {
+        cmark_gfm_core_extensions_ensure_registered();
+        g_once_init_leave(&extensions_ready, 1);
+    }
+    cmark_parser *parser = cmark_parser_new(CMARK_OPT_DEFAULT);
+    cmark_parser_attach_syntax_extension(parser, cmark_find_syntax_extension("table"));
+    cmark_parser_attach_syntax_extension(parser, cmark_find_syntax_extension("strikethrough"));
+    cmark_parser_feed(parser, source, size);
+    cmark_node *root = cmark_parser_finish(parser);
+    cmark_parser_free(parser);
     if (!root) {
         g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Could not parse this Markdown file.");
         return NULL;
@@ -190,6 +277,7 @@ MdDocument *md_parse(const char *source, gsize size, GCancellable *cancel, GErro
     doc->spans = g_array_new(FALSE, FALSE, sizeof(MdSpan));
     g_array_set_clear_func(doc->spans, clear_span);
     doc->anchors = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    doc->tables = g_ptr_array_new_with_free_func(free_table);
     Builder b = {.doc=doc, .out=g_string_new(NULL), .cancel=cancel, .error=error};
     b.anchor_suffixes = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     render(&b, root, 0, 0, FALSE);
@@ -203,6 +291,29 @@ MdDocument *md_parse(const char *source, gsize size, GCancellable *cancel, GErro
     doc->source = g_strndup(source, size);
     doc->text = g_string_free(b.out, FALSE);
     return doc;
+}
+
+char *md_copy_text(MdDocument *doc, int start, int end) {
+    int length = (int)g_utf8_strlen(doc->text, -1);
+    start = CLAMP(start, 0, length);
+    end = CLAMP(end, start, length);
+    GString *out = g_string_new(NULL);
+    int at = start;
+    for (guint i = 0; i < doc->tables->len; i++) {
+        MdTable *table = g_ptr_array_index(doc->tables, i);
+        if (table->offset < start || table->offset >= end) continue;
+        const char *from = g_utf8_offset_to_pointer(doc->text, at);
+        const char *to = g_utf8_offset_to_pointer(from, table->offset - at);
+        g_string_append_len(out, from, to - from);
+        /* The surrounding document already supplies its paragraph break. */
+        gsize bytes = strlen(table->tsv);
+        g_string_append_len(out, table->tsv, bytes && table->tsv[bytes-1] == '\n' ? bytes-1 : bytes);
+        at = table->offset + 1;
+    }
+    const char *from = g_utf8_offset_to_pointer(doc->text, at);
+    const char *to = g_utf8_offset_to_pointer(from, end - at);
+    g_string_append_len(out, from, to - from);
+    return g_string_free(out, FALSE);
 }
 
 MdDocument *md_load(GFile *file, GCancellable *cancel, GError **error) {

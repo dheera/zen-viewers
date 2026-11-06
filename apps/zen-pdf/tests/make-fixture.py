@@ -74,7 +74,7 @@ def write_selection_fixture(path):
     save_objects(path, objects)
 
 
-def write_fixture(path, tall_strip=False):
+def write_fixture(path, tall_strip=False, outline=False):
     pages = [(480, 720, "Ridge lines", "01   /   Portrait study"),
              (720, 480, "Open horizon", "02   /   Landscape study"),
              (360, 1200, "River descent", "03   /   Scroll to the lower margin")]
@@ -94,6 +94,15 @@ def write_fixture(path, tall_strip=False):
         content = page_stream(width, height, index, title, subtitle)
         objects.append(f"<< /Length {len(content)} >>\nstream\n".encode() + content + b"endstream")
 
+    if outline:
+        objects[0] = b"<< /Type /Catalog /Pages 2 0 R /Outlines 10 0 R /Dests << /Beginning [4 0 R /Fit] >> >>"
+        title = (b"\xfe\xff" + "Tall café".encode("utf-16-be")).hex().encode()
+        objects += [
+            b"<< /Type /Outlines /First 11 0 R /Last 13 0 R /Count 3 >>",
+            b"<< /Title (Horizon chapter) /Parent 10 0 R /Dest [6 0 R /Fit] /Next 13 0 R /First 12 0 R /Last 12 0 R /Count 1 >>",
+            b"<< /Title <" + title + b"> /Parent 11 0 R /Dest [8 0 R /Fit] >>",
+            b"<< /Title (Beginning) /Parent 10 0 R /Prev 11 0 R /Dest /Beginning >>",
+        ]
     save_objects(path, objects)
 
 
@@ -102,9 +111,10 @@ if __name__ == "__main__":
     parser.add_argument("output", type=Path)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--tall-strip", action="store_true", help="use a 1:240 third page")
+    mode.add_argument("--outline", action="store_true", help="include nested and named-destination contents")
     mode.add_argument("--selection", action="store_true", help="make a Unicode, rotated and image-only document")
     args = parser.parse_args()
     if args.selection:
         write_selection_fixture(args.output)
     else:
-        write_fixture(args.output, args.tall_strip)
+        write_fixture(args.output, args.tall_strip, args.outline)

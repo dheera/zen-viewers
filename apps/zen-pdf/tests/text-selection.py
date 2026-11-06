@@ -124,6 +124,12 @@ def run(directory):
         x("key", "ctrl+a")
         expect_copy(ALL_TEXT)
         print("PASS reverse drag, word, line and current-page selection", flush=True)
+        x("key", "ctrl+b")
+        clicks(2, 232, 174)
+        expect_copy("naïve")
+        x("key", "ctrl+b", "ctrl+a")
+        expect_copy(ALL_TEXT)
+        print("PASS selection coordinates while page sidebar is open", flush=True)
 
         x("windowsize", "--sync", win, 720, 600)
         time.sleep(.1)

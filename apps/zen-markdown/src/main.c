@@ -8,27 +8,46 @@
 #include <string.h>
 
 typedef struct {
+    GtkWidget *box, *grid, *scroll;
+    GPtrArray *labels;
+    MdTable *table;
+} TableView;
+
+typedef struct {
     ZenWindow *shell;
     GtkTextView *view;
     GtkScrolledWindow *scroll;
     GtkWidget *zoom_label, *source_toggle;
-    GtkTextTag *base, *tags[MD_STYLE_COUNT];
+    GtkTextTag *base, *code_top, *code_bottom, *tags[MD_STYLE_COUNT];
+    GPtrArray *tables;
     GFile *file;
     MdDocument *doc;
     GCancellable *cancel;
     guint generation;
-    int zoom;
+    guint reflow_idle;
+    int zoom, layout_width;
     double press_x, press_y;
 } Reader;
 
 typedef struct { GFile *file; guint generation; } Request;
+static void follow(Reader *r, const char *url);
+static void size_tables(Reader *r, int width);
+static void style_tables(Reader *r);
+
+static void free_table_view(gpointer data) {
+    TableView *table = data;
+    g_ptr_array_unref(table->labels);
+    g_free(table);
+}
 
 static void clear_reader(gpointer data) {
     Reader *r = data;
     if (r->cancel) g_cancellable_cancel(r->cancel);
+    if (r->reflow_idle) g_source_remove(r->reflow_idle);
     g_clear_object(&r->cancel);
     g_clear_object(&r->file);
     md_document_free(r->doc);
+    g_ptr_array_unref(r->tables);
     g_free(r);
 }
 
@@ -43,9 +62,49 @@ static gboolean source_mode(Reader *r) {
     return gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(r->source_toggle));
 }
 
+typedef struct { GtkTextView parent; } ReaderTextView;
+typedef struct { GtkTextViewClass parent; } ReaderTextViewClass;
+G_DEFINE_TYPE(ReaderTextView, reader_text_view, GTK_TYPE_TEXT_VIEW)
+
+static void code_background(GtkTextView *view, GtkTextViewLayer layer, GtkSnapshot *snapshot) {
+    Reader *r = g_object_get_data(G_OBJECT(view), "reader");
+    if (layer != GTK_TEXT_VIEW_LAYER_BELOW_TEXT || !r || !r->doc || source_mode(r)) return;
+    GdkRectangle visible;
+    gtk_text_view_get_visible_rect(view, &visible);
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(view);
+    GdkRGBA color = { .red=.91, .green=.935, .blue=.91, .alpha=1. };
+    for (guint i = 0; i < r->doc->spans->len; i++) {
+        MdSpan *span = &g_array_index(r->doc->spans, MdSpan, i);
+        if (span->style != MD_CODE_BLOCK) continue;
+        GtkTextIter start, end;
+        GdkRectangle first, last;
+        gtk_text_buffer_get_iter_at_offset(buffer, &start, span->start);
+        gtk_text_buffer_get_iter_at_offset(buffer, &end, span->end - 1);
+        if (gtk_text_iter_get_char(&end) == '\n' && span->end > span->start + 1)
+            gtk_text_iter_backward_char(&end);
+        gtk_text_view_get_iter_location(view, &start, &first);
+        gtk_text_view_get_iter_location(view, &end, &last);
+        float top = first.y - 9, bottom = last.y + last.height + 9;
+        if (bottom < visible.y || top > visible.y + visible.height) continue;
+        int left = gtk_text_view_get_left_margin(view), right = gtk_text_view_get_right_margin(view);
+        graphene_rect_t rect = GRAPHENE_RECT_INIT(left, top, MAX(1, visible.width-left-right), bottom-top);
+        GskRoundedRect rounded;
+        gsk_rounded_rect_init_from_rect(&rounded, &rect, 6.);
+        gtk_snapshot_push_rounded_clip(snapshot, &rounded);
+        gtk_snapshot_append_color(snapshot, &color, &rect);
+        gtk_snapshot_pop(snapshot);
+    }
+}
+
+static void reader_text_view_class_init(ReaderTextViewClass *klass) {
+    GTK_TEXT_VIEW_CLASS(klass)->snapshot_layer = code_background;
+}
+static void reader_text_view_init(ReaderTextView *view) { (void)view; }
+
 static void make_tags(Reader *r) {
     GtkTextBuffer *b = gtk_text_view_get_buffer(r->view);
-    r->base = gtk_text_buffer_create_tag(b, "base", "size-points", 13., NULL);
+    r->base = gtk_text_buffer_create_tag(b, "base", "size-points", 13.,
+        "family", "Noto Serif, DejaVu Serif, serif", NULL);
     const double scales[] = {1.85, 1.48, 1.26, 1.14, 1.05, 1.};
     for (int i = 0; i < 6; i++)
         r->tags[MD_HEADING1+i] = gtk_text_buffer_create_tag(b, NULL, "scale", scales[i],
@@ -55,18 +114,152 @@ static void make_tags(Reader *r) {
     r->tags[MD_CODE] = gtk_text_buffer_create_tag(b, NULL, "family", "monospace",
         "background", "#e4eae3", "scale", .94, NULL);
     r->tags[MD_CODE_BLOCK] = gtk_text_buffer_create_tag(b, NULL, "family", "monospace",
-        "paragraph-background", "#e8eee8", "scale", .94, NULL);
+        "scale", .94, "left-margin", 44, "right-margin", 44,
+        "pixels-above-lines", 2, "pixels-below-lines", 2, NULL);
+    r->code_top = gtk_text_buffer_create_tag(b, NULL, "pixels-above-lines", 12, NULL);
+    r->code_bottom = gtk_text_buffer_create_tag(b, NULL, "pixels-below-lines", 12, NULL);
     r->tags[MD_QUOTE] = gtk_text_buffer_create_tag(b, NULL, "foreground", "#50665b",
         "style", PANGO_STYLE_ITALIC, NULL);
     r->tags[MD_LINK] = gtk_text_buffer_create_tag(b, NULL, "foreground", "#19654f",
         "underline", PANGO_UNDERLINE_SINGLE, NULL);
     r->tags[MD_RULE] = gtk_text_buffer_create_tag(b, NULL, "foreground", "#8b9d90", NULL);
+    r->tags[MD_STRIKE] = gtk_text_buffer_create_tag(b, NULL, "strikethrough", TRUE, NULL);
+}
+
+static gboolean cell_link(GtkLabel *label, const char *uri, gpointer data) {
+    (void)label;
+    follow(data, uri);
+    return TRUE;
+}
+
+static void copy_table(GtkButton *button, gpointer data) {
+    MdTable *table = data;
+    gdk_clipboard_set_text(gtk_widget_get_clipboard(GTK_WIDGET(button)), table->tsv);
+}
+
+static char *cell_markup(MdCell *cell) {
+    GString *out = g_string_new(NULL);
+    int at = 0;
+    for (guint i = 0; i < cell->spans->len; i++) {
+        MdSpan *s = &g_array_index(cell->spans, MdSpan, i);
+        if (s->style != MD_LINK || s->start < at) continue;
+        const char *begin = g_utf8_offset_to_pointer(cell->text, at);
+        const char *start = g_utf8_offset_to_pointer(begin, s->start - at);
+        const char *end = g_utf8_offset_to_pointer(start, s->end - s->start);
+        g_autofree char *prefix = g_markup_escape_text(begin, start - begin);
+        g_autofree char *body = g_markup_escape_text(start, end - start);
+        g_autofree char *uri = g_markup_escape_text(s->url, -1);
+        g_string_append_printf(out, "%s<a href=\"%s\">%s</a>", prefix, uri, body);
+        at = s->end;
+    }
+    g_autofree char *tail = g_markup_escape_text(g_utf8_offset_to_pointer(cell->text, at), -1);
+    g_string_append(out, tail);
+    return g_string_free(out, FALSE);
+}
+
+static void style_cell(GtkLabel *label, MdCell *cell, gboolean header, int zoom) {
+    PangoAttrList *attrs = pango_attr_list_new();
+    pango_attr_list_insert(attrs, pango_attr_family_new("Noto Serif, DejaVu Serif, serif"));
+    pango_attr_list_insert(attrs, pango_attr_size_new((int)(13. * zoom / 100. * PANGO_SCALE)));
+    if (header) pango_attr_list_insert(attrs, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+    for (guint i = 0; i < cell->spans->len; i++) {
+        MdSpan *span = &g_array_index(cell->spans, MdSpan, i);
+        PangoAttribute *attr = NULL;
+        switch (span->style) {
+        case MD_STRONG: attr = pango_attr_weight_new(PANGO_WEIGHT_BOLD); break;
+        case MD_EMPHASIS: attr = pango_attr_style_new(PANGO_STYLE_ITALIC); break;
+        case MD_STRIKE: attr = pango_attr_strikethrough_new(TRUE); break;
+        case MD_CODE: attr = pango_attr_family_new("monospace"); break;
+        default: break;
+        }
+        if (attr) {
+            attr->start_index = (guint)(g_utf8_offset_to_pointer(cell->text, span->start) - cell->text);
+            attr->end_index = (guint)(g_utf8_offset_to_pointer(cell->text, span->end) - cell->text);
+            pango_attr_list_change(attrs, attr);
+        }
+    }
+    gtk_label_set_attributes(label, attrs);
+    pango_attr_list_unref(attrs);
+}
+
+static GtkWidget *new_table(Reader *r, MdTable *table) {
+    TableView *view = g_new0(TableView, 1);
+    view->table = table;
+    view->labels = g_ptr_array_new();
+    view->box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(view->box, "md-table");
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    view->scroll = scroll;
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_AUTOMATIC, GTK_POLICY_EXTERNAL);
+    view->grid = gtk_grid_new();
+    gtk_grid_set_column_homogeneous(GTK_GRID(view->grid), TRUE);
+    gtk_widget_set_hexpand(view->grid, TRUE);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), view->grid);
+    gtk_box_append(GTK_BOX(view->box), scroll);
+    for (guint i = 0; i < table->cells->len; i++) {
+        MdCell *cell = g_ptr_array_index(table->cells, i);
+        guint col = i % table->columns, row = i / table->columns;
+        GtkWidget *label = gtk_label_new(NULL);
+        g_autofree char *markup = cell_markup(cell);
+        gtk_label_set_markup(GTK_LABEL(label), markup);
+        gtk_label_set_selectable(GTK_LABEL(label), TRUE);
+        gtk_label_set_wrap(GTK_LABEL(label), TRUE);
+        gtk_label_set_wrap_mode(GTK_LABEL(label), row ? PANGO_WRAP_WORD_CHAR : PANGO_WRAP_WORD);
+        gtk_label_set_width_chars(GTK_LABEL(label), 10);
+        gtk_label_set_max_width_chars(GTK_LABEL(label), 24);
+        guint8 align = table->alignments[col];
+        gtk_label_set_xalign(GTK_LABEL(label), align == 'r' ? 1. : align == 'c' ? .5 : 0.);
+        gtk_label_set_yalign(GTK_LABEL(label), 0.);
+        gtk_label_set_justify(GTK_LABEL(label), align == 'r' ? GTK_JUSTIFY_RIGHT : align == 'c' ? GTK_JUSTIFY_CENTER : GTK_JUSTIFY_LEFT);
+        gtk_widget_set_hexpand(label, TRUE);
+        gtk_widget_add_css_class(label, "md-cell");
+        if (!row) gtk_widget_add_css_class(label, "md-header");
+        else if (!(row % 2)) gtk_widget_add_css_class(label, "md-even");
+        g_signal_connect(label, "activate-link", G_CALLBACK(cell_link), r);
+        gtk_grid_attach(GTK_GRID(view->grid), label, col, row, 1, 1);
+        g_ptr_array_add(view->labels, label);
+        style_cell(GTK_LABEL(label), cell, !row, r->zoom);
+    }
+    GtkWidget *copy = gtk_button_new_with_label("Copy table");
+    gtk_widget_add_css_class(copy, "flat");
+    gtk_widget_add_css_class(copy, "md-table-copy");
+    gtk_widget_set_halign(copy, GTK_ALIGN_END);
+    gtk_widget_set_tooltip_text(copy, "Copy all cells as tab-separated text");
+    g_signal_connect(copy, "clicked", G_CALLBACK(copy_table), table);
+    gtk_box_append(GTK_BOX(view->box), copy);
+    g_ptr_array_add(r->tables, view);
+    return view->box;
+}
+
+static void style_tables(Reader *r) {
+    for (guint t = 0; t < r->tables->len; t++) {
+        TableView *view = g_ptr_array_index(r->tables, t);
+        for (guint i = 0; i < view->labels->len; i++)
+            style_cell(g_ptr_array_index(view->labels, i), g_ptr_array_index(view->table->cells, i),
+                i < view->table->columns, r->zoom);
+    }
+}
+
+static void size_tables(Reader *r, int width) {
+    int inner = MAX(160, width - gtk_text_view_get_left_margin(r->view) - gtk_text_view_get_right_margin(r->view));
+    for (guint i = 0; i < r->tables->len; i++) {
+        TableView *view = g_ptr_array_index(r->tables, i);
+        gtk_widget_set_size_request(view->box, inner, -1);
+        int minimum_width, height;
+        gtk_widget_set_size_request(view->grid, -1, -1);
+        gtk_widget_measure(view->grid, GTK_ORIENTATION_HORIZONTAL, -1, &minimum_width, NULL, NULL, NULL);
+        gtk_widget_set_size_request(view->grid, MAX(inner, minimum_width), -1);
+        gtk_widget_measure(view->grid, GTK_ORIENTATION_VERTICAL, MAX(inner, minimum_width), &height, NULL, NULL, NULL);
+        gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(view->scroll), height);
+    }
 }
 
 static void show_content(Reader *r) {
     if (!r->doc) return;
     GtkTextBuffer *b = gtk_text_view_get_buffer(r->view);
     gboolean source = source_mode(r);
+    g_ptr_array_set_size(r->tables, 0);
+    g_object_set(r->base, "family", source ? "monospace" : "Noto Serif, DejaVu Serif, serif", NULL);
     gtk_text_view_set_monospace(r->view, source);
     gtk_text_buffer_set_text(b, source ? r->doc->source : r->doc->text, -1);
     GtkTextIter start, end;
@@ -78,7 +271,25 @@ static void show_content(Reader *r) {
             gtk_text_buffer_get_iter_at_offset(b, &start, span->start);
             gtk_text_buffer_get_iter_at_offset(b, &end, span->end);
             gtk_text_buffer_apply_tag(b, r->tags[span->style], &start, &end);
+            if (span->style == MD_CODE_BLOCK) {
+                GtkTextIter first = start, last = end;
+                gtk_text_iter_forward_char(&first);
+                gtk_text_buffer_apply_tag(b, r->code_top, &start, &first);
+                if (gtk_text_iter_backward_char(&last) && gtk_text_iter_get_char(&last) == '\n')
+                    gtk_text_iter_backward_char(&last);
+                gtk_text_buffer_apply_tag(b, r->code_bottom, &last, &end);
+            }
         }
+        for (guint i = 0; i < r->doc->tables->len; i++) {
+            MdTable *table = g_ptr_array_index(r->doc->tables, i);
+            gtk_text_buffer_get_iter_at_offset(b, &start, table->offset);
+            end = start;
+            gtk_text_iter_forward_char(&end);
+            gtk_text_buffer_delete(b, &start, &end);
+            GtkTextChildAnchor *anchor = gtk_text_buffer_create_child_anchor(b, &start);
+            gtk_text_view_add_child_at_anchor(r->view, new_table(r, table), anchor);
+        }
+        size_tables(r, gtk_widget_get_width(GTK_WIDGET(r->view)));
     }
     gtk_text_buffer_get_start_iter(b, &start);
     gtk_text_buffer_place_cursor(b, &start);
@@ -93,6 +304,8 @@ static void zoom_to(Reader *r, int percent) {
     g_snprintf(label, sizeof label, "%d%%", r->zoom);
     gtk_label_set_text(GTK_LABEL(r->zoom_label), label);
     g_object_set(r->base, "size-points", 13. * r->zoom / 100., NULL);
+    style_tables(r);
+    size_tables(r, gtk_widget_get_width(GTK_WIDGET(r->view)));
 }
 
 static void load_thread(GTask *task, gpointer source, gpointer data, GCancellable *cancel) {
@@ -195,6 +408,7 @@ static void follow(Reader *r, const char *url) {
         gtk_text_buffer_get_iter_at_offset(b, &iter, index-1);
         gtk_text_buffer_place_cursor(b, &iter);
         gtk_text_view_scroll_to_iter(r->view, &iter, 0., TRUE, 0., .12);
+        gtk_widget_grab_focus(GTK_WIDGET(r->view));
         return;
     }
     g_autofree char *base = g_file_get_uri(r->file);
@@ -261,18 +475,46 @@ static void minus(GtkButton *b, gpointer data) { (void)b; Reader *r=data; zoom_t
 static void plus(GtkButton *b, gpointer data) { (void)b; Reader *r=data; zoom_to(r,r->zoom+10); }
 static void toggle(GtkToggleButton *b, gpointer data) { (void)b; show_content(data); }
 
-static void reflow(GtkAdjustment *adjustment, gpointer data) {
+static void copy_selection(GtkTextView *view, gpointer data) {
     Reader *r = data;
-    int width = (int)gtk_adjustment_get_page_size(adjustment);
+    GtkTextIter start, end;
+    if (!r->doc || source_mode(r) || !r->doc->tables->len ||
+        !gtk_text_buffer_get_selection_bounds(gtk_text_view_get_buffer(view), &start, &end)) return;
+    g_autofree char *text = md_copy_text(r->doc, gtk_text_iter_get_offset(&start), gtk_text_iter_get_offset(&end));
+    gdk_clipboard_set_text(gtk_widget_get_clipboard(GTK_WIDGET(view)), text);
+    g_signal_stop_emission_by_name(view, "copy-clipboard");
+}
+
+static gboolean apply_reflow(gpointer data) {
+    Reader *r = data;
+    r->reflow_idle = 0;
+    int width = r->layout_width;
     int gutter = MAX(24, (width - 820)/2);
     if (gtk_text_view_get_left_margin(r->view) != gutter) {
         gtk_text_view_set_left_margin(r->view,gutter);
         gtk_text_view_set_right_margin(r->view,gutter);
     }
+    int code_margin;
+    g_object_get(r->tags[MD_CODE_BLOCK], "left-margin", &code_margin, NULL);
+    if (code_margin != gutter+12)
+        g_object_set(r->tags[MD_CODE_BLOCK], "left-margin", gutter+12, "right-margin", gutter+12, NULL);
+    size_tables(r, width);
+    return G_SOURCE_REMOVE;
+}
+
+static void reflow(GtkAdjustment *adjustment, gpointer data) {
+    Reader *r = data;
+    int width = (int)gtk_adjustment_get_page_size(adjustment);
+    /* Adjustment notifications also occur during GtkTextView validation. */
+    if (width > 0 && width != r->layout_width) {
+        r->layout_width = width;
+        if (!r->reflow_idle) r->reflow_idle = g_idle_add(apply_reflow, r);
+    }
 }
 
 static Reader *new_reader(GtkApplication *app) {
     Reader *r = g_new0(Reader,1);
+    r->tables = g_ptr_array_new_with_free_func(free_table_view);
     r->shell = zen_window_new(app, "Zen Markdown", 800, 760);
     GtkWindow *win = zen_window_get_window(r->shell);
     g_object_set_data_full(G_OBJECT(win), "md-reader", r, clear_reader);
@@ -284,8 +526,9 @@ static Reader *new_reader(GtkApplication *app) {
     const char *patterns[] = {"*.md","*.markdown","*.mdown","*.mkd","*.txt",NULL};
     zen_window_add_file_filter(r->shell, "Markdown documents", mime, patterns);
     r->scroll = GTK_SCROLLED_WINDOW(gtk_scrolled_window_new());
-    gtk_scrolled_window_set_policy(r->scroll, GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    r->view = GTK_TEXT_VIEW(gtk_text_view_new());
+    gtk_scrolled_window_set_policy(r->scroll, GTK_POLICY_EXTERNAL, GTK_POLICY_AUTOMATIC);
+    r->view = g_object_new(reader_text_view_get_type(), NULL);
+    g_object_set_data(G_OBJECT(r->view), "reader", r);
     gtk_widget_add_css_class(GTK_WIDGET(r->view), "md-reader");
     gtk_text_view_set_wrap_mode(r->view,GTK_WRAP_WORD_CHAR);
     gtk_text_view_set_editable(r->view,FALSE);
@@ -293,6 +536,7 @@ static Reader *new_reader(GtkApplication *app) {
     gtk_text_view_set_top_margin(r->view,56); gtk_text_view_set_bottom_margin(r->view,80);
     gtk_text_view_set_pixels_inside_wrap(r->view,3);
     make_tags(r);
+    g_signal_connect(r->view, "copy-clipboard", G_CALLBACK(copy_selection), r);
     g_signal_connect(gtk_scrolled_window_get_hadjustment(r->scroll), "changed", G_CALLBACK(reflow), r);
     gtk_scrolled_window_set_child(r->scroll,GTK_WIDGET(r->view));
     zen_window_set_child(r->shell,GTK_WIDGET(r->scroll));
@@ -329,7 +573,15 @@ static void startup(GApplication *app, gpointer data) {
     GtkCssProvider *css = gtk_css_provider_new();
     gtk_css_provider_load_from_data(css,
         "textview.md-reader, textview.md-reader text {background-color:#fbfcf8;color:#26332c;}"
-        "textview.md-reader text selection {background-color:#a8cfbb;color:#14221b;}",-1);
+        "textview.md-reader text selection {background-color:#a8cfbb;color:#14221b;}"
+        ".md-table {color:#26332c;}"
+        ".md-cell {padding:10px 14px;border-bottom:1px solid #dce3dc;border-right:1px solid #e5eae3;}"
+        ".md-header {background:#e8eee6;border-bottom:2px solid #b9cabb;}"
+        ".md-even {background:#f2f5ef;}"
+        ".md-cell selection {background:#a8cfbb;color:#14221b;}"
+        ".md-cell link {color:#19654f;}"
+        ".md-table-copy {font:11px sans-serif;min-height:22px;padding:2px 7px;color:#50665b;opacity:0;}"
+        ".md-table:hover .md-table-copy,.md-table:focus-within .md-table-copy {opacity:1;}",-1);
     gtk_style_context_add_provider_for_display(gdk_display_get_default(),GTK_STYLE_PROVIDER(css),GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(css);
 }
@@ -357,13 +609,40 @@ static int self_test(void) {
         }
     }
     g_assert_true(found); md_document_free(d);
+    const char *table_source = "# Café\n\n| Name | Style | Value |\n| :--- | :---: | ---: |\n"
+        "| naïve | **bold** and `a\\|b` | €2 |\n| [next](#after) | ~~old~~ | €3 |\n\n# After\n";
+    d = md_parse(table_source, strlen(table_source), NULL, &error);
+    g_assert_no_error(error); g_assert_nonnull(d);
+    g_assert_cmpuint(d->tables->len, ==, 1);
+    MdTable *table = g_ptr_array_index(d->tables, 0);
+    g_assert_cmpuint(table->columns, ==, 3);
+    g_assert_cmpuint(table->cells->len, ==, 9);
+    g_assert_cmpint(table->alignments[0], ==, 'l');
+    g_assert_cmpint(table->alignments[1], ==, 'c');
+    g_assert_cmpint(table->alignments[2], ==, 'r');
+    g_assert_cmpstr(table->tsv, ==, "Name\tStyle\tValue\nnaïve\tbold and a|b\t€2\nnext\told\t€3\n");
+    MdCell *styled = g_ptr_array_index(table->cells, 4);
+    g_assert_cmpuint(styled->spans->len, ==, 2);
+    g_autofree char *copy = md_copy_text(d, 0, (int)g_utf8_strlen(d->text, -1));
+    g_assert_cmpstr(copy, ==, "Café\n\nName\tStyle\tValue\nnaïve\tbold and a|b\t€2\nnext\told\t€3\n\nAfter\n\n");
+    int after = GPOINTER_TO_INT(g_hash_table_lookup(d->anchors, "after")) - 1;
+    g_autofree char *tail = md_copy_text(d, after, after + 5);
+    g_assert_cmpstr(tail, ==, "After");
+    g_assert_cmpstr(d->source, ==, table_source);
+    md_document_free(d);
+    GString *large = g_string_new("| Header |\n| --- |\n");
+    for (int i = 0; i < 2048; i++) g_string_append(large, "| row |\n");
+    g_assert_null(md_parse(large->str, large->len, NULL, &error));
+    g_assert_error(error, G_IO_ERROR, G_IO_ERROR_NO_SPACE);
+    g_clear_error(&error);
+    g_string_free(large, TRUE);
     const char invalid[] = "A\0B";
     g_assert_null(md_parse(invalid,3,NULL,&error)); g_assert_nonnull(error);
-    g_print("PASS Markdown parsing, formatting offsets, anchors, lists and invalid input.\n"); return 0;
+    g_print("PASS Markdown parsing, Unicode offsets, anchors, GFM tables, alignment, TSV copy and input limits.\n"); return 0;
 }
 int main(int argc, char **argv) {
     if (argc==2 && !strcmp(argv[1],"--self-test")) return self_test();
-    if (argc==2 && !strcmp(argv[1],"--version")) {g_print("zen-markdown 0.2.0\n");return 0;}
+    if (argc==2 && !strcmp(argv[1],"--version")) {g_print("zen-markdown " ZEN_VERSION "\n");return 0;}
     if (argc==2 && !strcmp(argv[1],"--help")) {
         g_print("Usage: zen-markdown [FILE.md …]\nCtrl+O open · Ctrl+C copy · Ctrl++/− text size · Ctrl+U source\n");
         return 0;

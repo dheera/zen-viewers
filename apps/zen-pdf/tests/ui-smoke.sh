@@ -6,7 +6,7 @@ tempdir=$(mktemp -d)
 trap 'rm -rf -- "$tempdir"' EXIT
 python3 tests/make-fixture.py "$tempdir/zen-test.pdf"
 xvfb-run -a -s '-screen 0 1280x1024x24' dbus-run-session -- \
-  env GTK_A11Y=none GSETTINGS_BACKEND=memory GIO_USE_VFS=local GDK_BACKEND=x11 \
+  env GTK_A11Y=none GSETTINGS_BACKEND=memory GIO_USE_VFS=local GDK_BACKEND=x11 GDK_DEBUG=no-portals \
   GSK_RENDERER=cairo G_DEBUG=fatal-warnings python3 - "$tempdir/zen-test.pdf" <<'PY'
 import os
 import subprocess
@@ -56,26 +56,18 @@ try:
     wait_for(lambda: page_is(landscape), "right arrow advances")
     x("key", "Left")
     wait_for(lambda: page_is(portrait), "left arrow goes back")
-
-    # The portrait page fills this viewport. In idle mode the lower center is paper.
-    strip = (215, 548, 485, 567)
-    def dark_fraction():
-        counts = screenshot().crop(strip).convert("L").histogram()
-        return sum(counts[:90]) / sum(counts)
-
-    x("mousemove", "--window", window, 350, 300)
-    wait_for(lambda: dark_fraction() > .65, "pointer reveals controls")
-    x("mousemove", 1200, 900)
-    wait_for(lambda: dark_fraction() < .1, "leaving the window hides controls")
+    time.sleep(.35)
 
     x("windowsize", "--sync", window, 340, 260)
     x("key", "End")
     wait_for(lambda: page_is(tall), "resize and open tall page")
+    time.sleep(.4)
     band = (50, 80, 290, 180)
     before = screenshot().crop(band)
     x("key", "Down")
     wait_for(lambda: screenshot().crop(band).tobytes() != before.tobytes(),
              "scroll tall page")
+    time.sleep(.4)
     x("key", "Up")
     wait_for(lambda: screenshot().crop(band).tobytes() == before.tobytes(),
              "return to original scroll position")
