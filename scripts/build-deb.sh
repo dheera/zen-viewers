@@ -23,7 +23,7 @@ mkdir source/apps
 for app in "${apps[@]}"; do
     mkdir -p "source/apps/$app"
     cp -r "$root/apps/$app/data" "source/apps/$app/"
-    if [[ $app == zen-image ]]; then cp "$root/apps/$app/main.c" "source/apps/$app/"
+    if [[ $app == zen-image ]]; then cp "$root/apps/$app/"{main.c,thumbnail.h} "source/apps/$app/"
     else cp -r "$root/apps/$app/src" "source/apps/$app/"; fi
 done
 cat > debian/changelog <<CHANGELOG

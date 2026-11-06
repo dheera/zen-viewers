@@ -41,7 +41,7 @@ build/libzen-ui.a: build/zen-ui.o
 	$(AR) rcs $@ $<
 build/zen-pdf: apps/zen-pdf/src/main.c apps/zen-pdf/src/selection.inc apps/zen-pdf/src/view.inc build/libzen-ui.a common/zen-ui.h VERSION
 	$(CC) $(CPPFLAGS) $(VERSION_FLAG) $(GTK_CFLAGS) $(PDF_CFLAGS) $(CFLAGS) -Icommon $< build/libzen-ui.a -o $@ $(LDFLAGS) $(GTK_LIBS) $(PDF_LIBS) -lm
-build/zen-image: apps/zen-image/main.c build/libzen-ui.a common/zen-ui.h VERSION
+build/zen-image: apps/zen-image/main.c apps/zen-image/thumbnail.h build/libzen-ui.a common/zen-ui.h VERSION
 	$(CC) $(CPPFLAGS) $(VERSION_FLAG) $(GTK_CFLAGS) $(IMAGE_CFLAGS) $(CFLAGS) -Icommon $< build/libzen-ui.a -o $@ $(LDFLAGS) $(GTK_LIBS) $(IMAGE_LIBS) -lm
 build/zen-markdown: apps/zen-markdown/src/main.c apps/zen-markdown/src/document.c apps/zen-markdown/src/document.h build/libzen-ui.a common/zen-ui.h VERSION
 	$(CC) $(CPPFLAGS) $(VERSION_FLAG) $(GTK_CFLAGS) $(MARKDOWN_CFLAGS) $(CFLAGS) -Icommon apps/zen-markdown/src/main.c apps/zen-markdown/src/document.c build/libzen-ui.a -o $@ $(LDFLAGS) $(GTK_LIBS) $(MARKDOWN_LIBS) -lm

@@ -2,6 +2,7 @@
 #define GDK_VERSION_MIN_REQUIRED GDK_VERSION_4_6
 #define GDK_VERSION_MAX_ALLOWED GDK_VERSION_4_6
 #include "zen-ui.h"
+#include "thumbnail.h"
 #include <math.h>
 #include <string.h>
 #ifdef HAVE_LIBEXIF
@@ -12,7 +13,7 @@ typedef enum { FIT_IMAGE, FIT_WIDTH, ACTUAL_PIXELS } ImageFit;
 
 typedef struct {
     GtkWidget parent_instance;
-    GdkTexture *texture;
+    GdkTexture *texture, *fit_texture, *thumbnail;
     int image_width, image_height, turns;
     ImageFit fit;
     double zoom, pan_x, pan_y, drag_x, drag_y, pointer_x, pointer_y;
@@ -48,6 +49,14 @@ static void image_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     const GdkRGBA background = {.085, .095, .095, 1};
     graphene_rect_t viewport = GRAPHENE_RECT_INIT(0, 0, w, h);
     gtk_snapshot_append_color(snapshot, &background, &viewport);
+    if (self->thumbnail) {
+        float tw = gdk_texture_get_width(self->thumbnail), th = gdk_texture_get_height(self->thumbnail);
+        float scale = MIN(w / tw, h / th);
+        graphene_rect_t bounds = GRAPHENE_RECT_INIT((w - tw * scale) / 2, (h - th * scale) / 2,
+                                                    tw * scale, th * scale);
+        gtk_snapshot_append_texture(snapshot, self->thumbnail, &bounds);
+        return;
+    }
     if (!self->texture) return;
 
     double scale = image_scale(self), dx = self->pan_x, dy = self->pan_y;
@@ -58,13 +67,22 @@ static void image_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     gtk_snapshot_push_clip(snapshot, &viewport);
     gtk_snapshot_translate(snapshot, &center);
     gtk_snapshot_rotate(snapshot, self->turns * 90.f);
-    gtk_snapshot_append_texture(snapshot, self->texture, &image);
+    GdkTexture *texture = self->texture;
+    if (self->fit_texture) {
+        int device_scale = gtk_widget_get_scale_factor(widget);
+        if (iw * device_scale <= gdk_texture_get_width(self->fit_texture) &&
+            ih * device_scale <= gdk_texture_get_height(self->fit_texture))
+            texture = self->fit_texture;
+    }
+    gtk_snapshot_append_texture(snapshot, texture, &image);
     gtk_snapshot_pop(snapshot);
 }
 
 static void image_canvas_dispose(GObject *obj) {
     ImageCanvas *self = (ImageCanvas *)obj;
     g_clear_object(&self->texture);
+    g_clear_object(&self->fit_texture);
+    g_clear_object(&self->thumbnail);
     G_OBJECT_CLASS(image_canvas_parent_class)->dispose(obj);
 }
 
@@ -146,19 +164,41 @@ static gboolean scroll(GtkEventControllerScroll *control, double dx, double dy, 
     return TRUE;
 }
 
-/* The worker owns pixels and metadata until the main thread accepts the load. */
-typedef struct { GdkPixbuf *pixels; int width, height; char *metadata; } Decoded;
-typedef struct { GFile *file; int direction; } ImageLoad;
-typedef struct { GFile *file; char *name, *sort_key; gboolean unreadable; } ImageEntry;
+/* Large neighbors keep their fit texture under the per-image cache budget. */
+#define NEIGHBOR_BYTES ((gsize)80 * 1024 * 1024)
+
+typedef struct {
+    GdkTexture *texture, *fit_texture;
+    int width, height;
+    gsize bytes;
+    char *metadata;
+} Decoded;
+typedef struct {
+    GFile *file;
+    GCancellable *cancel;
+    GdkTexture *thumbnail;
+    int fit_edge;
+    gboolean changed;
+} ImageLoad;
+typedef struct {
+    GFile *file;
+    char *name, *sort_key;
+    gboolean unreadable, preload_failed;
+    Decoded *cached;
+} ImageEntry;
 
 static void decoded_free(gpointer data) {
-    Decoded *result = data; g_clear_object(&result->pixels); g_free(result->metadata); g_free(result);
+    Decoded *result = data;
+    g_clear_object(&result->texture); g_clear_object(&result->fit_texture);
+    g_free(result->metadata); g_free(result);
 }
 static void image_load_free(gpointer data) {
-    ImageLoad *load = data; g_object_unref(load->file); g_free(load);
+    ImageLoad *load = data;
+    g_object_unref(load->file); g_object_unref(load->cancel); g_clear_object(&load->thumbnail); g_free(load);
 }
 static void image_entry_free(gpointer data) {
     ImageEntry *entry = data;
+    g_clear_pointer(&entry->cached, decoded_free);
     g_object_unref(entry->file); g_free(entry->name); g_free(entry->sort_key); g_free(entry);
 }
 static void metadata_field(GString *text, const char *name, const char *value) {
@@ -194,9 +234,38 @@ static void image_size(GdkPixbufLoader *loader, int width, int height, gpointer 
     double ratio = MIN(1., MIN(16384. / MAX(width, height), sqrt((32. * 1024 * 1024) / ((double)width * height))));
     if (ratio < 1.) gdk_pixbuf_loader_set_size(loader, MAX(1, (int)(width * ratio)), MAX(1, (int)(height * ratio)));
 }
+static GdkTexture *texture_from_pixels(GdkPixbuf *pixels) {
+    GBytes *bytes = g_bytes_new_with_free_func(gdk_pixbuf_read_pixels(pixels),
+        gdk_pixbuf_get_byte_length(pixels), g_object_unref, g_object_ref(pixels));
+    GdkMemoryFormat format = gdk_pixbuf_get_has_alpha(pixels) ? GDK_MEMORY_R8G8B8A8 : GDK_MEMORY_R8G8B8;
+    GdkTexture *texture = gdk_memory_texture_new(gdk_pixbuf_get_width(pixels), gdk_pixbuf_get_height(pixels),
+                                                 format, bytes, gdk_pixbuf_get_rowstride(pixels));
+    g_bytes_unref(bytes);
+    return texture;
+}
+static void prepare_textures(Decoded *result, GdkPixbuf *pixels, int fit_edge) {
+    result->texture = texture_from_pixels(pixels);
+    result->bytes = gdk_pixbuf_get_byte_length(pixels);
+    int w = gdk_pixbuf_get_width(pixels), h = gdk_pixbuf_get_height(pixels);
+    if (MAX(w, h) <= fit_edge * 1.5 && result->bytes <= NEIGHBOR_BYTES) return;
+    double ratio = (double)fit_edge / MAX(w, h);
+    GdkPixbuf *scaled = gdk_pixbuf_scale_simple(pixels, MAX(1, (int)(w * ratio)),
+        MAX(1, (int)(h * ratio)), GDK_INTERP_BILINEAR);
+    if (scaled) {
+        result->fit_texture = texture_from_pixels(scaled);
+        result->bytes += gdk_pixbuf_get_byte_length(scaled);
+        g_object_unref(scaled);
+    }
+}
+static void publish_thumbnail(GTask *task, GdkPixbuf *pixels);
 static void decode(GTask *task, gpointer source, gpointer data, GCancellable *cancel) {
     (void)source;
     ImageLoad *load = data;
+    GdkPixbuf *thumbnail = load_cached_thumbnail(load->file, cancel);
+    if (thumbnail) {
+        publish_thumbnail(task, thumbnail);
+        g_object_unref(thumbnail);
+    }
     GError *error = NULL;
     GFileInputStream *in = g_file_read(load->file, cancel, &error);
     if (!in) { g_task_return_error(task, error); return; }
@@ -226,6 +295,7 @@ static void decode(GTask *task, gpointer source, gpointer data, GCancellable *ca
     }
     g_object_unref(in);
     gdk_pixbuf_loader_close(loader, error ? NULL : &error);
+    g_autoptr(GdkPixbuf) pixels = NULL;
     if (!error) {
         GdkPixbuf *pix = gdk_pixbuf_loader_get_pixbuf(loader);
         if (pix) {
@@ -233,11 +303,12 @@ static void decode(GTask *task, gpointer source, gpointer data, GCancellable *ca
             if (orientation && orientation[0] >= '5' && orientation[0] <= '8') {
                 int swap = result->width; result->width = result->height; result->height = swap;
             }
-            result->pixels = gdk_pixbuf_apply_embedded_orientation(pix);
+            pixels = gdk_pixbuf_apply_embedded_orientation(pix);
         }
-        if (!result->pixels || result->width <= 0 || result->height <= 0)
+        if (!pixels || result->width <= 0 || result->height <= 0)
             g_set_error_literal(&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "The image contains no readable pixels.");
     }
+    if (!error) g_cancellable_set_error_if_cancelled(cancel, &error);
     if (!error) {
         GString *text = g_string_new(NULL);
         char *name = g_file_get_basename(load->file);
@@ -249,7 +320,7 @@ static void decode(GTask *task, gpointer source, gpointer data, GCancellable *ca
         metadata_field(text, "Dimensions", dimensions); g_free(dimensions);
         char *size = g_format_size_full(info ? (guint64)g_file_info_get_size(info) : total, G_FORMAT_SIZE_LONG_FORMAT);
         metadata_field(text, "File size", size); g_free(size);
-        metadata_field(text, "Transparency", gdk_pixbuf_get_has_alpha(result->pixels) ? "Yes" : "No");
+        metadata_field(text, "Transparency", gdk_pixbuf_get_has_alpha(pixels) ? "Yes" : "No");
         if (info && g_file_info_has_attribute(info, G_FILE_ATTRIBUTE_TIME_MODIFIED)) {
             GDateTime *time = g_date_time_new_from_unix_local((gint64)g_file_info_get_attribute_uint64(info, G_FILE_ATTRIBUTE_TIME_MODIFIED));
             if (time) {
@@ -257,8 +328,8 @@ static void decode(GTask *task, gpointer source, gpointer data, GCancellable *ca
                 metadata_field(text, "Modified", formatted); g_free(formatted); g_date_time_unref(time);
             }
         }
-        if (gdk_pixbuf_get_width(result->pixels) != result->width || gdk_pixbuf_get_height(result->pixels) != result->height) {
-            char *preview = g_strdup_printf("%d × %d pixels", gdk_pixbuf_get_width(result->pixels), gdk_pixbuf_get_height(result->pixels));
+        if (gdk_pixbuf_get_width(pixels) != result->width || gdk_pixbuf_get_height(pixels) != result->height) {
+            char *preview = g_strdup_printf("%d × %d pixels", gdk_pixbuf_get_width(pixels), gdk_pixbuf_get_height(pixels));
             metadata_field(text, "Preview resolution", preview); g_free(preview);
         }
 #ifdef HAVE_LIBEXIF
@@ -267,6 +338,7 @@ static void decode(GTask *task, gpointer source, gpointer data, GCancellable *ca
         char *location = g_file_get_parse_name(load->file);
         metadata_field(text, "Location", location); g_free(location);
         result->metadata = g_string_free(text, FALSE);
+        prepare_textures(result, pixels, load->fit_edge);
     }
 #ifdef HAVE_LIBEXIF
     if (exif) exif_loader_unref(exif);
@@ -332,13 +404,22 @@ typedef struct {
     ZenWindow *window;
     ImageCanvas *canvas;
     GtkWidget *counter, *previous, *next, *metadata, *metadata_text;
-    GCancellable *loading, *listing;
+    GtkWidget *progress, *spinner;
+    guint progress_timer, load_idle;
+    GCancellable *listing;
+    GFileMonitor *monitor;
+    ImageLoad *loads[2];  /* Owned by their tasks until the completion callback. */
+    ImageEntry *neighbors[2];
+    Decoded *displayed;
     GFile *requested, *current;
     GPtrArray *files;
-    int cursor, pending_steps, skipped;
+    int cursor, pending_steps, skipped, direction;
+    gboolean waiting, cache_current;
 } ImageView;
 
 static void request_image(ImageView *view, GFile *file, int direction);
+static void schedule_loads(ImageView *view);
+static void show_thumbnail(ImageView *view, GdkTexture *texture);
 static int find_image(ImageView *view, GFile *file) {
     if (view->files && file) for (guint i = 0; i < view->files->len; i++) {
         ImageEntry *entry = g_ptr_array_index(view->files, i);
@@ -354,6 +435,30 @@ static int adjacent_image(ImageView *view, int index, int direction) {
         candidate += direction;
     }
     return -1;
+}
+static ImageEntry *neighbor_at(ImageView *view, int direction) {
+    int index = adjacent_image(view, view->cursor, direction);
+    return index >= 0 ? g_ptr_array_index(view->files, index) : NULL;
+}
+static ImageEntry *find_neighbor(ImageView *view, GFile *file) {
+    for (int direction = -1; direction <= 1; direction += 2) {
+        ImageEntry *entry = neighbor_at(view, direction);
+        if (entry && g_file_equal(entry->file, file)) return entry;
+    }
+    return NULL;
+}
+static void update_neighbors(ImageView *view) {
+    ImageEntry *previous = neighbor_at(view, -1), *next = neighbor_at(view, 1);
+    for (guint i = 0; i < G_N_ELEMENTS(view->neighbors); i++) {
+        ImageEntry *old = view->neighbors[i];
+        if (old && old != previous && old != next) g_clear_pointer(&old->cached, decoded_free);
+    }
+    view->neighbors[0] = previous; view->neighbors[1] = next;
+}
+static void cache_image(ImageEntry *entry, Decoded *result) {
+    if (result->bytes > NEIGHBOR_BYTES) g_clear_object(&result->texture);
+    g_clear_pointer(&entry->cached, decoded_free);
+    entry->cached = result;
 }
 static void refresh_navigation(ImageView *view) {
     int count = view->files ? (int)view->files->len : 0;
@@ -381,6 +486,36 @@ static gboolean navigate(ImageView *view, int delta) {
     refresh_navigation(view);
     return TRUE;
 }
+static void invalidate_image(ImageView *view, GFile *file) {
+    if (!file) return;
+    if (view->current && g_file_equal(view->current, file)) view->cache_current = FALSE;
+    for (guint i = 0; i < G_N_ELEMENTS(view->neighbors); i++) {
+        ImageEntry *entry = view->neighbors[i];
+        if (entry && g_file_equal(entry->file, file)) g_clear_pointer(&entry->cached, decoded_free);
+    }
+    for (guint i = 0; i < G_N_ELEMENTS(view->loads); i++) {
+        ImageLoad *load = view->loads[i];
+        if (load && g_file_equal(load->file, file)) {
+            load->changed = TRUE;
+            g_clear_object(&load->thumbnail);
+        }
+    }
+    if (view->waiting && g_file_equal(view->requested, file)) show_thumbnail(view, NULL);
+}
+static void folder_changed(GFileMonitor *monitor, GFile *file, GFile *other,
+                           GFileMonitorEvent event, gpointer data) {
+    (void)monitor; (void)event;
+    ImageView *view = data;
+    if (zen_window_is_closed(view->window)) return;
+    invalidate_image(view, file);
+    invalidate_image(view, other);
+}
+static void stop_monitor(ImageView *view) {
+    if (!view->monitor) return;
+    g_signal_handlers_disconnect_by_data(view->monitor, view);
+    g_file_monitor_cancel(view->monitor);
+    g_clear_object(&view->monitor);
+}
 static void directory_ready(GObject *source, GAsyncResult *result, gpointer data) {
     (void)data;
     ImageView *view = g_object_get_data(source, "zen-image-view");
@@ -388,66 +523,62 @@ static void directory_ready(GObject *source, GAsyncResult *result, gpointer data
     GPtrArray *files = g_task_propagate_pointer(task, &error);
     if (view->listing == g_task_get_cancellable(task) && !zen_window_is_closed(view->window)) {
         g_clear_object(&view->listing);
-        g_clear_pointer(&view->files, g_ptr_array_unref); view->files = files; files = NULL;
+        view->files = g_steal_pointer(&files);
+        if (view->files && g_file_is_native(view->requested)) {
+            g_autoptr(GFile) parent = g_file_get_parent(view->requested);
+            if (parent) view->monitor = g_file_monitor_directory(parent, G_FILE_MONITOR_WATCH_MOVES, NULL, NULL);
+            if (view->monitor) g_signal_connect(view->monitor, "changed", G_CALLBACK(folder_changed), view);
+        }
         view->cursor = find_image(view, view->requested);
         refresh_navigation(view);
         int steps = view->pending_steps; view->pending_steps = 0;
         if (steps) navigate(view, steps);
+        schedule_loads(view);
         if (error && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
             zen_window_notice(view->window, "This folder could not be listed. You can still open individual images.");
     }
     g_clear_pointer(&files, g_ptr_array_unref); g_clear_error(&error);
 }
 
-static void decoded(GObject *source, GAsyncResult *async_result, gpointer unused) {
-    (void)unused;
-    ImageView *view = g_object_get_data(source, "zen-image-view");
-    GTask *task = G_TASK(async_result);
-    ImageLoad *load = g_task_get_task_data(task);
-    GError *error = NULL;
-    Decoded *result = g_task_propagate_pointer(task, &error);
-    if (view->loading != g_task_get_cancellable(task) || zen_window_is_closed(view->window)) {
-        if (result) decoded_free(result);
-        g_clear_error(&error);
-        return;
+static gboolean show_progress(gpointer data) {
+    ImageView *view = data;
+    view->progress_timer = 0;
+    gtk_widget_set_visible(view->progress, TRUE);
+    gtk_spinner_start(GTK_SPINNER(view->spinner));
+    return G_SOURCE_REMOVE;
+}
+static void hide_progress(ImageView *view) {
+    g_clear_handle_id(&view->progress_timer, g_source_remove);
+    gtk_spinner_stop(GTK_SPINNER(view->spinner));
+    gtk_widget_set_visible(view->progress, FALSE);
+}
+static void show_thumbnail(ImageView *view, GdkTexture *texture) {
+    if (g_set_object(&view->canvas->thumbnail, texture)) {
+        gtk_widget_queue_draw(GTK_WIDGET(view->canvas));
+        if (!view->displayed) zen_window_set_ready(view->window, texture != NULL);
     }
-    g_clear_object(&view->loading);
-    if (!result) {
-        if (load->direction && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-            view->skipped++;
-            int failed = find_image(view, load->file);
-            if (failed >= 0) ((ImageEntry *)g_ptr_array_index(view->files, failed))->unreadable = TRUE;
-            if (!navigate(view, load->direction)) {
-                view->cursor = find_image(view, view->current); refresh_navigation(view);
-                zen_window_notice(view->window, "No more readable images in this direction.");
-            }
-        } else if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-            /* Some optional loaders return a remote traceback instead of a
-             * concise decoding error. Keep those out of the image canvas. */
-            const char *reason = error->message;
-            if (strlen(reason) > 200 || strchr(reason, '\n'))
-                reason = "The image could not be decoded. It may be damaged or need an additional image loader.";
-            char *message = g_strdup_printf("%s\nUse zen-image --formats to see installed image formats.", reason);
-            zen_window_notice(view->window, message); g_free(message);
-        }
-        g_clear_error(&error);
-        return;
+}
+static void present_image(ImageView *view, GFile *file, Decoded *result) {
+    view->waiting = FALSE;
+    g_clear_handle_id(&view->load_idle, g_source_remove);
+    hide_progress(view);
+    show_thumbnail(view, NULL);
+    update_neighbors(view);
+    if (view->displayed != result) {
+        ImageEntry *previous = view->cache_current ? find_neighbor(view, view->current) : NULL;
+        if (previous) cache_image(previous, g_steal_pointer(&view->displayed));
+        g_clear_pointer(&view->displayed, decoded_free);
+        view->displayed = result;
     }
+    view->cache_current = TRUE;
     ImageCanvas *canvas = view->canvas;
-    /* This wraps the decoded pixel buffer. GSK retains the same texture across frames. */
-    GdkPixbuf *pixels = result->pixels;
-    GBytes *bytes = g_bytes_new_with_free_func(gdk_pixbuf_read_pixels(pixels),
-        gdk_pixbuf_get_byte_length(pixels), g_object_unref, g_object_ref(pixels));
-    GdkMemoryFormat format = gdk_pixbuf_get_has_alpha(pixels) ? GDK_MEMORY_R8G8B8A8 : GDK_MEMORY_R8G8B8;
-    GdkTexture *texture = gdk_memory_texture_new(gdk_pixbuf_get_width(pixels), gdk_pixbuf_get_height(pixels),
-                                                 format, bytes, gdk_pixbuf_get_rowstride(pixels));
-    g_bytes_unref(bytes);
-    g_clear_object(&canvas->texture); canvas->texture = texture;
+    g_set_object(&canvas->texture, result->texture);
+    g_set_object(&canvas->fit_texture, result->fit_texture);
     canvas->image_width = result->width; canvas->image_height = result->height;
     canvas->turns = 0; set_fit(canvas, FIT_IMAGE);
     gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(view->metadata_text)), result->metadata, -1);
-    g_set_object(&view->current, load->file);
-    char *name = g_file_get_basename(load->file);
+    g_set_object(&view->current, file);
+    char *name = g_file_get_basename(file);
     zen_window_set_title(view->window, name); g_free(name);
     zen_window_clear_notice(view->window); zen_window_set_ready(view->window, TRUE);
     if (view->skipped) {
@@ -455,25 +586,169 @@ static void decoded(GObject *source, GAsyncResult *async_result, gpointer unused
         zen_window_notice(view->window, message); g_free(message); view->skipped = 0;
     }
     if (!gtk_widget_get_visible(view->metadata)) gtk_widget_grab_focus(GTK_WIDGET(canvas));
-    decoded_free(result);
 }
 
-static void request_image(ImageView *view, GFile *file, int direction) {
-    if (view->loading) g_cancellable_cancel(view->loading);
-    g_clear_object(&view->loading); view->loading = g_cancellable_new();
-    g_set_object(&view->requested, file);
-    zen_window_notice(view->window, "Opening image…");
+static ImageLoad *find_load(ImageView *view, GFile *file) {
+    for (guint i = 0; i < G_N_ELEMENTS(view->loads); i++) {
+        ImageLoad *load = view->loads[i];
+        if (load && !g_cancellable_is_cancelled(load->cancel) && g_file_equal(load->file, file)) return load;
+    }
+    return NULL;
+}
+typedef struct { GTask *task; GdkTexture *texture; } ThumbnailUpdate;
+static gboolean thumbnail_ready(gpointer data) {
+    ThumbnailUpdate *update = data;
+    ImageLoad *load = g_task_get_task_data(update->task);
+    ImageView *view = g_object_get_data(g_task_get_source_object(update->task), "zen-image-view");
+    if (!zen_window_is_closed(view->window) && !load->changed && find_load(view, load->file) == load) {
+        g_set_object(&load->thumbnail, update->texture);
+        if (view->waiting && g_file_equal(view->requested, load->file) && !view->canvas->thumbnail)
+            show_thumbnail(view, update->texture);
+    }
+    return G_SOURCE_REMOVE;
+}
+static void thumbnail_update_free(gpointer data) {
+    ThumbnailUpdate *update = data;
+    g_object_unref(update->task); g_object_unref(update->texture); g_free(update);
+}
+static void publish_thumbnail(GTask *task, GdkPixbuf *pixels) {
+    ThumbnailUpdate *update = g_new(ThumbnailUpdate, 1);
+    update->task = g_object_ref(task);
+    update->texture = texture_from_pixels(pixels);
+    GSource *idle = g_idle_source_new();
+    g_source_set_priority(idle, G_PRIORITY_DEFAULT);
+    g_source_set_callback(idle, thumbnail_ready, update, thumbnail_update_free);
+    g_source_attach(idle, g_task_get_context(task));
+    g_source_unref(idle);
+}
+
+static void load_failed(ImageView *view, GFile *file, const GError *error) {
+    view->waiting = FALSE;
+    show_thumbnail(view, NULL);
+    if (view->direction) {
+        view->skipped++;
+        int failed = find_image(view, file);
+        if (failed >= 0) ((ImageEntry *)g_ptr_array_index(view->files, failed))->unreadable = TRUE;
+        if (navigate(view, view->direction)) return;
+        view->cursor = find_image(view, view->current);
+        refresh_navigation(view);
+        zen_window_notice(view->window, "No more readable images in this direction.");
+    } else {
+        /* Some optional loaders return a remote traceback. Keep it out of the canvas. */
+        const char *reason = error->message;
+        if (strlen(reason) > 200 || strchr(reason, '\n'))
+            reason = "The image could not be decoded. It may be damaged or need an additional image loader.";
+        char *message = g_strdup_printf("%s\nUse zen-image --formats to see installed image formats.", reason);
+        zen_window_notice(view->window, message); g_free(message);
+    }
+    hide_progress(view);
+}
+
+static void decoded(GObject *source, GAsyncResult *async_result, gpointer unused) {
+    (void)unused;
+    ImageView *view = g_object_get_data(source, "zen-image-view");
+    GTask *task = G_TASK(async_result);
+    ImageLoad *load = g_task_get_task_data(task);
+    for (guint i = 0; i < G_N_ELEMENTS(view->loads); i++)
+        if (view->loads[i] == load) view->loads[i] = NULL;
+    g_autoptr(GError) error = NULL;
+    Decoded *result = g_task_propagate_pointer(task, &error);
+    if (!zen_window_is_closed(view->window)) {
+        if (!g_cancellable_is_cancelled(load->cancel)) {
+            if (view->waiting && g_file_equal(view->requested, load->file)) {
+                if (result) {
+                    present_image(view, load->file, g_steal_pointer(&result));
+                    if (load->changed) view->cache_current = FALSE;
+                } else load_failed(view, load->file, error);
+            } else {
+                ImageEntry *entry = find_neighbor(view, load->file);
+                if (entry && result && !load->changed) cache_image(entry, g_steal_pointer(&result));
+                if (entry && error) entry->preload_failed = TRUE;
+            }
+        }
+        schedule_loads(view);
+    }
+    g_clear_pointer(&result, decoded_free);
+}
+
+static void start_load(ImageView *view, GFile *file, gboolean preload) {
+    guint slot = 0;
+    while (slot < G_N_ELEMENTS(view->loads) && view->loads[slot]) slot++;
+    if (slot == G_N_ELEMENTS(view->loads)) return;
     ImageLoad *load = g_new0(ImageLoad, 1);
-    load->file = g_object_ref(file); load->direction = direction;
-    GTask *task = g_task_new(zen_window_get_window(view->window), view->loading, decoded, NULL);
+    load->file = g_object_ref(file); load->cancel = g_cancellable_new();
+    GtkWidget *canvas = GTK_WIDGET(view->canvas);
+    int edge = MAX(gtk_widget_get_width(canvas), gtk_widget_get_height(canvas)) * gtk_widget_get_scale_factor(canvas);
+    /* Round up for small window resizes without uploading the entire source. */
+    load->fit_edge = CLAMP(((edge + 255) / 256) * 256, 1024, 3072);
+    view->loads[slot] = load;
+    GTask *task = g_task_new(zen_window_get_window(view->window), load->cancel, decoded, NULL);
+    if (preload) g_task_set_priority(task, G_PRIORITY_DEFAULT_IDLE);
     g_task_set_task_data(task, load, image_load_free);
     g_task_run_in_thread(task, decode); g_object_unref(task);
+}
+static void schedule_loads(ImageView *view) {
+    if (view->waiting) {
+        if (!view->load_idle && !find_load(view, view->requested)) start_load(view, view->requested, FALSE);
+        return;
+    }
+    update_neighbors(view);
+    /* Only one speculative decode at a time. A second slot lets foreground work
+     * begin while a superseded decoder is still unwinding. */
+    if (view->loads[0] || view->loads[1]) return;
+    guint first = view->direction < 0 ? 0 : 1;
+    for (guint i = 0; i < G_N_ELEMENTS(view->neighbors); i++) {
+        ImageEntry *entry = view->neighbors[(first + i) % G_N_ELEMENTS(view->neighbors)];
+        if (entry && !entry->cached && !entry->preload_failed) {
+            start_load(view, entry->file, TRUE);
+            return;
+        }
+    }
+}
+static gboolean start_latest_load(gpointer data) {
+    ImageView *view = data;
+    view->load_idle = 0;
+    schedule_loads(view);
+    return G_SOURCE_REMOVE;
+}
+static void cancel_loads(ImageView *view, ImageLoad *keep, gboolean keep_neighbors) {
+    for (guint i = 0; i < G_N_ELEMENTS(view->loads); i++) {
+        ImageLoad *load = view->loads[i];
+        if (load && load != keep && (!keep_neighbors || !find_neighbor(view, load->file)))
+            g_cancellable_cancel(load->cancel);
+    }
+}
+static void request_image(ImageView *view, GFile *file, int direction) {
+    g_set_object(&view->requested, file);
+    view->direction = direction;
+    ImageEntry *entry = direction ? g_ptr_array_index(view->files, view->cursor) : NULL;
+    Decoded *ready = NULL;
+    if (direction && view->cache_current && g_file_equal(view->current, file)) ready = view->displayed;
+    else if (entry && entry->cached && entry->cached->texture) ready = g_steal_pointer(&entry->cached);
+    ImageLoad *load = direction ? find_load(view, file) : NULL;
+    cancel_loads(view, load, ready != NULL);
+    if (ready) present_image(view, file, ready);
+    else {
+        view->waiting = TRUE;
+        zen_window_clear_notice(view->window);
+        GdkTexture *preview = entry && entry->cached ? entry->cached->fit_texture : load ? load->thumbnail : NULL;
+        show_thumbnail(view, preview);
+        if (!view->progress_timer && !gtk_widget_get_visible(view->progress))
+            view->progress_timer = g_timeout_add(100, show_progress, view);
+        /* Let queued key repeats settle on a target before starting disk work. */
+        if (!load && !view->load_idle)
+            view->load_idle = g_idle_add_full(G_PRIORITY_HIGH_IDLE, start_latest_load, view, NULL);
+    }
+    schedule_loads(view);
 }
 static void open_image(ZenWindow *window, GFile *file, gpointer user) {
     ImageView *view = user;
     if (view->listing) g_cancellable_cancel(view->listing);
     g_clear_object(&view->listing);
+    stop_monitor(view);
+    memset(view->neighbors, 0, sizeof(view->neighbors));
     g_clear_pointer(&view->files, g_ptr_array_unref);
+    view->cache_current = FALSE;
     view->cursor = -1; view->pending_steps = 0; view->skipped = 0;
     refresh_navigation(view);
     request_image(view, file, 0);
@@ -484,14 +759,21 @@ static void open_image(ZenWindow *window, GFile *file, gpointer user) {
 }
 static void release_view(gpointer user) {
     ImageView *view = user;
-    g_clear_object(&view->loading); g_clear_object(&view->listing);
+    g_clear_handle_id(&view->progress_timer, g_source_remove);
+    g_clear_handle_id(&view->load_idle, g_source_remove);
+    g_clear_object(&view->listing);
+    stop_monitor(view);
     g_clear_object(&view->requested); g_clear_object(&view->current);
+    g_clear_pointer(&view->displayed, decoded_free);
     g_clear_pointer(&view->files, g_ptr_array_unref); g_free(view);
 }
 static gboolean closing(GtkWindow *window, gpointer user) {
     (void)window;
     ImageView *view = user;
-    if (view->loading) g_cancellable_cancel(view->loading);
+    cancel_loads(view, NULL, FALSE);
+    stop_monitor(view);
+    g_clear_handle_id(&view->load_idle, g_source_remove);
+    hide_progress(view);
     if (view->listing) g_cancellable_cancel(view->listing);
     return FALSE;
 }
@@ -554,6 +836,17 @@ static void new_view(GtkApplication *application, GFile *file) {
 
     GtkWidget *content = gtk_overlay_new();
     gtk_overlay_set_child(GTK_OVERLAY(content), GTK_WIDGET(canvas));
+    view->progress = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    view->spinner = gtk_spinner_new();
+    gtk_box_append(GTK_BOX(view->progress), view->spinner);
+    gtk_box_append(GTK_BOX(view->progress), gtk_label_new("Opening image…"));
+    gtk_widget_add_css_class(view->progress, "toast");
+    gtk_widget_set_halign(view->progress, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(view->progress, GTK_ALIGN_END);
+    gtk_widget_set_margin_bottom(view->progress, 92);
+    gtk_widget_set_can_target(view->progress, FALSE);
+    gtk_widget_set_visible(view->progress, FALSE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(content), view->progress);
     view->metadata = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(view->metadata, "image-metadata");
     gtk_widget_set_halign(view->metadata, GTK_ALIGN_END);
