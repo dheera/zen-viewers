@@ -6,7 +6,7 @@
 struct ZenWindow {
     GtkWindow *window;
     GtkWidget *root, *child, *top_left, *top_center, *top_right, *top_fade;
-    GtkWidget *bottom_fade, *controls, *title, *empty, *empty_title, *empty_subtitle, *status;
+    GtkWidget *bottom_fade, *controls, *title, *empty, *empty_title, *empty_subtitle, *status, *progress;
     GPtrArray *filters;
     GtkWidget *cursor_widget;
     GdkCursor *saved_cursor;
@@ -15,8 +15,9 @@ struct ZenWindow {
     gpointer open_data;
     ZenPointerClaimFunc claims_pointer;
     gpointer pointer_data;
-    guint hide_timer, notice_timer;
+    guint hide_timer, notice_timer, progress_timer, progress_tick;
     guint hover_zones;
+    double progress_fraction;
     gboolean closed, peek, ready;
 };
 
@@ -196,6 +197,82 @@ void zen_window_notice(ZenWindow *z, const char *message) {
     gtk_widget_set_visible(z->status, TRUE);
     z->notice_timer = g_timeout_add_seconds(6, notice_timeout, z);
 }
+static void draw_progress(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer data) {
+    ZenWindow *z = data;
+    double x = width / 2., y = height / 2.;
+    cairo_set_source_rgba(cr, .055, .085, .074, .53);
+    cairo_arc(cr, x, y, 17, 0, 2 * G_PI);
+    cairo_fill(cr);
+
+    cairo_set_line_width(cr, 2.25);
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+    cairo_set_source_rgba(cr, .92, 1, .95, .26);
+    cairo_arc(cr, x, y, 10, 0, 2 * G_PI);
+    cairo_stroke(cr);
+
+    if (z->progress_fraction == 0) return;
+    double start = -G_PI_2;
+    double sweep = z->progress_fraction < 0 ? .58 * G_PI : z->progress_fraction * 2 * G_PI;
+    if (z->progress_tick) {
+        GdkFrameClock *clock = gtk_widget_get_frame_clock(GTK_WIDGET(area));
+        if (clock) start += 2 * G_PI * (gdk_frame_clock_get_frame_time(clock) % 1200000) / 1200000.;
+    }
+    cairo_set_source_rgba(cr, .92, 1, .95, .92);
+    cairo_arc(cr, x, y, 10, start, start + sweep);
+    cairo_stroke(cr);
+}
+static gboolean progress_frame(GtkWidget *widget, GdkFrameClock *clock, gpointer data) {
+    (void)clock; (void)data;
+    gtk_widget_queue_draw(widget);
+    return G_SOURCE_CONTINUE;
+}
+static void stop_progress_animation(ZenWindow *z) {
+    if (z->progress_tick) {
+        gtk_widget_remove_tick_callback(z->progress, z->progress_tick);
+        z->progress_tick = 0;
+    }
+}
+static void update_progress(ZenWindow *z) {
+    gboolean animate = FALSE;
+    if (z->progress_fraction < 0) {
+        gtk_accessible_reset_property(GTK_ACCESSIBLE(z->progress), GTK_ACCESSIBLE_PROPERTY_VALUE_NOW);
+        g_object_get(gtk_widget_get_settings(z->progress), "gtk-enable-animations", &animate, NULL);
+    } else {
+        gtk_accessible_update_property(GTK_ACCESSIBLE(z->progress), GTK_ACCESSIBLE_PROPERTY_VALUE_NOW,
+                                       z->progress_fraction, -1);
+    }
+    if (animate && !z->progress_tick)
+        z->progress_tick = gtk_widget_add_tick_callback(z->progress, progress_frame, NULL, NULL);
+    else if (!animate) stop_progress_animation(z);
+    gtk_widget_queue_draw(z->progress);
+}
+static void progress_settings_changed(GtkSettings *settings, GParamSpec *property, GtkWindow *window) {
+    (void)settings; (void)property;
+    ZenWindow *z = g_object_get_data(G_OBJECT(window), "zen-window");
+    if (z && !z->closed && z->progress_fraction < 0 && gtk_widget_get_visible(z->progress))
+        update_progress(z);
+}
+static gboolean reveal_progress(gpointer data) {
+    ZenWindow *z = data;
+    z->progress_timer = 0;
+    gtk_widget_set_visible(z->progress, TRUE);
+    update_progress(z);
+    return G_SOURCE_REMOVE;
+}
+void zen_window_show_progress(ZenWindow *z, double fraction) {
+    if (z->closed) return;
+    double previous = z->progress_fraction;
+    z->progress_fraction = fraction >= 0 ? MIN(fraction, 1.) : -1.;
+    if (gtk_widget_get_visible(z->progress)) {
+        if (z->progress_fraction != previous) update_progress(z);
+    } else if (!z->progress_timer) z->progress_timer = g_timeout_add(100, reveal_progress, z);
+}
+void zen_window_hide_progress(ZenWindow *z) {
+    g_clear_handle_id(&z->progress_timer, g_source_remove);
+    if (z->closed) return;
+    stop_progress_animation(z);
+    gtk_widget_set_visible(z->progress, FALSE);
+}
 void zen_window_set_title(ZenWindow *z, const char *filename) {
     char *display_name = filename ? g_filename_display_name(filename) : g_strdup(z->app_name);
     gtk_label_set_text(GTK_LABEL(z->title), display_name);
@@ -319,7 +396,8 @@ static gboolean dropped(GtkDropTarget *target, const GValue *value, double x, do
     z->open(z, file, z->open_data); return TRUE;
 }
 static gboolean close_request(GtkWindow *window, gpointer data) {
-    (void)window; ZenWindow *z = data; restore_cursor(z); z->closed = TRUE;
+    (void)window; ZenWindow *z = data; restore_cursor(z);
+    zen_window_hide_progress(z); z->closed = TRUE;
     if (z->hide_timer) { g_source_remove(z->hide_timer); z->hide_timer = 0; }
     if (z->notice_timer) { g_source_remove(z->notice_timer); z->notice_timer = 0; }
     return FALSE;
@@ -328,6 +406,7 @@ static void free_window(gpointer data) {
     ZenWindow *z = data;
     if (z->hide_timer) g_source_remove(z->hide_timer);
     if (z->notice_timer) g_source_remove(z->notice_timer);
+    g_clear_handle_id(&z->progress_timer, g_source_remove);
     g_clear_object(&z->cursor_widget); g_clear_object(&z->saved_cursor);
     g_ptr_array_unref(z->filters); g_free(z->app_name); g_free(z);
 }
@@ -387,6 +466,21 @@ ZenWindow *zen_window_new(GtkApplication *application, const char *app_name, int
     gtk_overlay_add_overlay(GTK_OVERLAY(z->root), z->empty);
     z->top_fade = make_fade(z, "zen-top-fade", GTK_ALIGN_START);
     z->bottom_fade = make_fade(z, "zen-bottom-fade", GTK_ALIGN_END);
+    z->progress = g_object_new(GTK_TYPE_DRAWING_AREA, "accessible-role", GTK_ACCESSIBLE_ROLE_PROGRESS_BAR, NULL);
+    gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(z->progress), 36);
+    gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(z->progress), 36);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(z->progress), draw_progress, z, NULL);
+    gtk_accessible_update_property(GTK_ACCESSIBLE(z->progress), GTK_ACCESSIBLE_PROPERTY_LABEL, "Loading",
+        GTK_ACCESSIBLE_PROPERTY_VALUE_MIN, 0., GTK_ACCESSIBLE_PROPERTY_VALUE_MAX, 1., -1);
+    gtk_widget_set_can_target(z->progress, FALSE);
+    gtk_widget_set_halign(z->progress, GTK_ALIGN_END);
+    gtk_widget_set_valign(z->progress, GTK_ALIGN_END);
+    gtk_widget_set_margin_end(z->progress, 22);
+    gtk_widget_set_margin_bottom(z->progress, 22);
+    gtk_widget_set_visible(z->progress, FALSE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(z->root), z->progress);
+    g_signal_connect_object(gtk_widget_get_settings(z->progress), "notify::gtk-enable-animations",
+                            G_CALLBACK(progress_settings_changed), z->window, 0);
     z->top_left = make_controls(z, GTK_ALIGN_START, GTK_ALIGN_START, 10, 2);
     gtk_box_append(GTK_BOX(z->top_left), zen_button_new("document-open-symbolic", "Open file (Ctrl+O)", G_CALLBACK(open_clicked), z));
     z->title = gtk_label_new(app_name); gtk_label_set_ellipsize(GTK_LABEL(z->title), PANGO_ELLIPSIZE_MIDDLE);

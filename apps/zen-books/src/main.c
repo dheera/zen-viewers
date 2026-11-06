@@ -484,6 +484,7 @@ static void page_loaded(GObject *source, GAsyncResult *result, gpointer data) {
             zen_window_notice(r->shell, error->message);
         }
         if (r->book) update_navigation(r);
+        zen_window_hide_progress(r->shell);
     }
     page_free(page);
 }
@@ -494,16 +495,18 @@ static void read_page(Reader *r, Request *request) {
     r->opening = request->file != NULL;
     GTask *task = g_task_new(zen_window_get_window(r->shell), r->loading, page_loaded, NULL);
     g_task_set_task_data(task, request, request_free);
+    zen_window_clear_notice(r->shell);
+    zen_window_show_progress(r->shell, -1);
     g_task_run_in_thread(task, read_worker);
     g_object_unref(task);
 }
 static void open_book(ZenWindow *shell, GFile *file, gpointer data) {
+    (void)shell;
     Reader *r = data;
     save_position(r);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(r->contents_toggle), FALSE);
     Request *request = g_new0(Request, 1);
     request->file = g_object_ref(file);
-    zen_window_notice(shell, "Opening book…");
     read_page(r, request);
 }
 static void go_to(Reader *r, int chapter, const char *fragment, gboolean end) {

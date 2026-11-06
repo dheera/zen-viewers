@@ -400,10 +400,33 @@ def run(binary, tmp):
         wait(entered.exists, "Full image decode reached the controlled read gate")
         wait(lambda: color(300,200,thumbnail_color), "Cached thumbnail appears while full decode is blocked")
         assert named("rapid1.png"), "A thumbnail must not commit the full image title"
+
+        def loading_overlay_pixels():
+            # The fixture is horizontally uniform. Compare the lower-right
+            # indicator with the same rows on the left, so image color changes,
+            # margins and chrome gradients do not depend on an exact screenshot.
+            frame = ImageGrab.grab(bbox=(ox,oy,ox+600,oy+500),
+                                   xdisplay=os.environ["DISPLAY"]).convert("RGB")
+            pixels = frame.load()
+            def differs(a, b):
+                return max(abs(x-y) for x,y in zip(a,b)) > 12
+            ring = sum(differs(pixels[px+520,py],pixels[px,py])
+                       for py in range(440,480) for px in range(20,60))
+            # The old loading toast occupied the center above the toolbar.
+            # Match each row against uncovered image pixels on that row.
+            toast = sum(differs(pixels[px,py],pixels[80,py])
+                        for py in range(344,414) for px in range(170,430))
+            return ring, toast
+
+        wait(lambda: loading_overlay_pixels()[0] >= 24,
+             "A small lower-right loading ring appears during blocked decode")
+        assert loading_overlay_pixels()[1] <= 24, "Slow decode must leave the old toast region unobscured"
         gate.unlink()
         wait(lambda: named(preview_source.name) and color(300,200,yellow),
              "Full-resolution image replaces its cached thumbnail")
-        print("PASS cached thumbnail precedes full decode and full pixels replace the preview", flush=True)
+        wait(lambda: loading_overlay_pixels()[0] <= 8, "The loading ring disappears after decode completes")
+        assert loading_overlay_pixels()[1] <= 24, "Completed decode must leave the old toast region unobscured"
+        print("PASS thumbnail then full pixels, lower-right loading ring and unobscured toast region", flush=True)
         x("key", "ctrl+w")
         assert app.wait(timeout=5) == 0
     finally:

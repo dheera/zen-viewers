@@ -26,6 +26,9 @@ void zen_window_present(ZenWindow *window);
 void zen_window_choose_file(ZenWindow *window);
 void zen_window_notice(ZenWindow *window, const char *message);
 void zen_window_clear_notice(ZenWindow *window);
+/* Show a delayed ring. Use -1 for an indeterminate load, or a fraction from 0 to 1. */
+void zen_window_show_progress(ZenWindow *window, double fraction);
+void zen_window_hide_progress(ZenWindow *window);
 void zen_window_reveal_controls(ZenWindow *window);
 void zen_window_toggle_fullscreen(ZenWindow *window);
 gboolean zen_window_is_closed(ZenWindow *window);

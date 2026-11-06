@@ -236,7 +236,9 @@ static gboolean dispatch(gpointer data) {
         mpv_event *event=mpv_wait_event(v->mpv,0);
         if(event->event_id==MPV_EVENT_NONE)break;
         if(event->event_id==MPV_EVENT_PROPERTY_CHANGE)property_changed(v,event->data);
+        else if(event->event_id==MPV_EVENT_START_FILE)zen_window_show_progress(v->shell,-1.);
         else if(event->event_id==MPV_EVENT_FILE_LOADED){
+            zen_window_hide_progress(v->shell);
             v->loaded=TRUE;zen_window_set_ready(v->shell,TRUE);zen_window_clear_notice(v->shell);
             if(v->recovering){
                 seek(v,v->restore_position,TRUE,TRUE);flag(v,"pause",v->restore_pause);v->recovering=FALSE;
@@ -246,6 +248,8 @@ static gboolean dispatch(gpointer data) {
             update_ui(v,TRUE);gtk_gl_area_queue_render(v->area);
         }else if(event->event_id==MPV_EVENT_END_FILE){
             mpv_event_end_file *end=event->data;
+            if(end->reason!=MPV_END_FILE_REASON_STOP&&end->reason!=MPV_END_FILE_REASON_REDIRECT)
+                zen_window_hide_progress(v->shell);
             if(end->reason==MPV_END_FILE_REASON_ERROR){
                 v->loaded=FALSE;zen_window_set_ready(v->shell,FALSE);
                 char *message=g_strdup_printf("Could not play this file: %s",mpv_error_string(end->error));notice(v,message);g_free(message);
@@ -253,6 +257,7 @@ static gboolean dispatch(gpointer data) {
                 update_ui(v,TRUE);gtk_gl_area_queue_render(v->area);
             }
         }else if(event->event_id==MPV_EVENT_COMMAND_REPLY&&event->error<0){
+            if(event->reply_userdata==v->load_id)zen_window_hide_progress(v->shell);
             if(event->reply_userdata==0||event->reply_userdata==v->load_id)notice(v,mpv_error_string(event->error));
             if(diagnostics)g_printerr("zen-video command-error=%s\n",mpv_error_string(event->error));
         }else if(event->event_id==MPV_EVENT_LOG_MESSAGE&&diagnostics){
@@ -305,7 +310,8 @@ static void *get_proc(void *data,const char *name) {
 }
 static void realize(GtkGLArea *area,gpointer data) {
     Video *v=data;if(!v->mpv||g_atomic_int_get(&v->closing))return;
-    gtk_gl_area_make_current(area);if(gtk_gl_area_get_error(area))return;
+    gtk_gl_area_make_current(area);
+    if(gtk_gl_area_get_error(area)){zen_window_hide_progress(v->shell);return;}
     v->gl_context=g_object_ref(gtk_gl_area_get_context(area));
     mpv_opengl_init_params init={.get_proc_address=get_proc};
     mpv_render_param params[5]={{MPV_RENDER_PARAM_API_TYPE,(void*)MPV_RENDER_API_TYPE_OPENGL},
@@ -319,6 +325,7 @@ static void realize(GtkGLArea *area,gpointer data) {
 #endif
     int error=mpv_render_context_create(&v->render,v->mpv,params);
     if(error<0){
+        zen_window_hide_progress(v->shell);
         GError *problem=g_error_new_literal(G_IO_ERROR,G_IO_ERROR_FAILED,mpv_error_string(error));
         gtk_gl_area_set_error(area,problem);g_error_free(problem);g_clear_object(&v->gl_context);return;
     }
@@ -372,8 +379,12 @@ static void load_pending(Video *v) {
     if(!v->mpv||!v->render||!v->path)return;
     const char *args[]={"loadfile",v->path,"replace",NULL};
     int error=mpv_command_async(v->mpv,++v->load_id,args);
-    if(error<0)notice(v,mpv_error_string(error));
-    else {notice(v,"Opening video…");if(!v->recovering)flag(v,"pause",FALSE);}
+    if(error<0){zen_window_hide_progress(v->shell);notice(v,mpv_error_string(error));}
+    else {
+        zen_window_clear_notice(v->shell);
+        zen_window_show_progress(v->shell,-1.);
+        if(!v->recovering)flag(v,"pause",FALSE);
+    }
 }
 static void open_file(ZenWindow *shell,GFile *file,gpointer data) {
     (void)shell;Video *v=data;char *path=g_file_get_path(file);

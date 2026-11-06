@@ -25,7 +25,7 @@ typedef struct {
     ZenWindow *shell;
     GtkGLArea *area;
     Zen3dRenderer *renderer;
-    GtkWidget *busy, *busy_bar, *busy_label, *info, *info_label;
+    GtkWidget *info, *info_label;
     GtkWidget *grid_toggle, *wire_toggle, *info_toggle;
     GtkPopover *views;
     GCancellable *loading;
@@ -115,14 +115,6 @@ static Zen3dView render_view(Viewer *v) {
     };
 }
 
-static void busy(Viewer *v, const char *message, double fraction) {
-    if (message) {
-        gtk_label_set_text(GTK_LABEL(v->busy_label), message);
-        if (fraction < 0.) gtk_progress_bar_pulse(GTK_PROGRESS_BAR(v->busy_bar));
-        else gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(v->busy_bar), fraction);
-    }
-    gtk_revealer_set_reveal_child(GTK_REVEALER(v->busy), message != NULL);
-}
 static char *model_details(GFile *file, const Zen3dModel *model) {
     guint64 triangles = 0, lines = 0, points = 0;
     guint textures = 0;
@@ -196,14 +188,14 @@ static gboolean upload_frame(GtkWidget *area, GdkFrameClock *clock, gpointer dat
             v->last_progress = now;
             if (v->request) {
                 int percent = g_atomic_int_get(&v->request->percent);
-                busy(v, percent < 0 ? "Reading model…" : "Reading mesh…", percent * .008);
+                zen_window_show_progress(v->shell, percent < 0 ? -1. : percent * .008);
             } else {
-                busy(v, "Uploading mesh…", .8 + .2 * zen3d_renderer_progress(v->renderer));
+                zen_window_show_progress(v->shell, .8 + .2 * zen3d_renderer_progress(v->renderer));
             }
         }
         return G_SOURCE_CONTINUE;
     }
-    busy(v, NULL, 0.);
+    zen_window_hide_progress(v->shell);
     v->upload_tick = 0;
     return G_SOURCE_REMOVE;
 }
@@ -301,11 +293,11 @@ static void model_loaded(GObject *source, GAsyncResult *result, gpointer data) {
             if (!v->showing_preview) reset_view(v);
             zen3d_renderer_set_model(v->renderer, model);
             model = NULL;
-            busy(v, "Uploading mesh…", .8);
+            zen_window_show_progress(v->shell, .8);
             queue_upload(v);
         } else {
             if (v->showing_preview && !v->uploading) clear_model(v);
-            if (!v->uploading) busy(v, NULL, 0.);
+            if (!v->uploading) zen_window_hide_progress(v->shell);
             if (error && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
                 zen_window_notice(v->shell, error->message);
         }
@@ -315,7 +307,7 @@ static void model_loaded(GObject *source, GAsyncResult *result, gpointer data) {
 static void start_load(Viewer *v, GFile *file) {
     v->loading = g_cancellable_new();
     zen_window_clear_notice(v->shell);
-    busy(v, "Reading model…", -1.);
+    zen_window_show_progress(v->shell, -1.);
     v->last_progress = 0;
     LoadRequest *request = g_new0(LoadRequest, 1);
     request->file = g_object_ref(file);
@@ -560,24 +552,6 @@ static GtkWidget *view_menu(Viewer *v) {
     return menu;
 }
 static void make_overlays(Viewer *v, GtkOverlay *canvas) {
-    GtkWidget *status = gtk_box_new(GTK_ORIENTATION_VERTICAL, 7);
-    gtk_widget_add_css_class(status, "zen-3d-progress");
-    v->busy_label = gtk_label_new(NULL);
-    gtk_box_append(GTK_BOX(status), v->busy_label);
-    v->busy_bar = gtk_progress_bar_new();
-    gtk_widget_set_size_request(v->busy_bar, 184, -1);
-    gtk_progress_bar_set_pulse_step(GTK_PROGRESS_BAR(v->busy_bar), .13);
-    gtk_box_append(GTK_BOX(status), v->busy_bar);
-    v->busy = gtk_revealer_new();
-    gtk_revealer_set_child(GTK_REVEALER(v->busy), status);
-    gtk_revealer_set_transition_type(GTK_REVEALER(v->busy), GTK_REVEALER_TRANSITION_TYPE_CROSSFADE);
-    gtk_revealer_set_transition_duration(GTK_REVEALER(v->busy), 160);
-    gtk_widget_set_halign(v->busy, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(v->busy, GTK_ALIGN_END);
-    gtk_widget_set_margin_bottom(v->busy, 80);
-    gtk_widget_set_can_target(v->busy, FALSE);
-    gtk_overlay_add_overlay(canvas, v->busy);
-
     v->info = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     gtk_widget_add_css_class(v->info, "zen-3d-details");
     gtk_widget_set_halign(v->info, GTK_ALIGN_END);
@@ -699,10 +673,6 @@ static void startup(GApplication *app, gpointer data) {
     gtk_css_provider_load_from_data(style,
         ".zen-3d .empty { color:#293a36; }"
         ".zen-3d .empty .muted { color:#41564e; }"
-        ".zen-3d-progress { background: rgba(23,31,29,0.92); color:#e8f0eb;"
-        " border:1px solid rgba(210,230,218,0.18); border-radius:14px; padding:10px 16px; }"
-        ".zen-3d-progress progressbar trough { min-height:4px; border-radius:3px; background:#46534e; }"
-        ".zen-3d-progress progressbar progress { min-height:4px; border-radius:3px; background:#b6d6bd; }"
         ".zen-3d-details { background:rgba(25,33,31,0.96); color:#ecf3ee; border-radius:14px;"
         " border:1px solid rgba(210,230,218,0.23); padding:12px 14px; }"
         ".zen-3d-details button { background:transparent; color:#ecf3ee; box-shadow:none; }"

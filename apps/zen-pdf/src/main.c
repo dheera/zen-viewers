@@ -213,6 +213,19 @@ static Raster *cached(App *a, int page, int pixels, gboolean exact) {
     }
     return best;
 }
+/* Only foreground work owns the indicator. A cached page stays usable while
+ * higher-resolution rendering or neighbor prefetch runs in the background. */
+static void update_progress(App *a) {
+    if (a->closed) return;
+    gboolean waiting = a->opening != NULL;
+    if (!waiting && a->doc) {
+        int pixels = desired_pixels(a);
+        waiting = !cached(a, a->page, pixels, FALSE) &&
+            !(a->failed_page == a->page && a->failed_pixels == pixels);
+    }
+    if (waiting) zen_window_show_progress(a->shell, -1);
+    else zen_window_hide_progress(a->shell);
+}
 static GdkRGBA edge_average(cairo_surface_t *surface, int edge) {
     int w = cairo_image_surface_get_width(surface), h = cairo_image_surface_get_height(surface);
     int stride = cairo_image_surface_get_stride(surface);
@@ -314,6 +327,7 @@ static gboolean start_render(gpointer data) {
     return G_SOURCE_REMOVE;
 }
 static void request_render(App *a) {
+    update_progress(a);
     if (a->closed || !a->doc || a->rendering) return;
     if (a->render_timer) g_source_remove(a->render_timer);
     a->render_timer = g_timeout_add(45, start_render, a);
@@ -563,8 +577,12 @@ static void open_done(GObject *source, GAsyncResult *result, gpointer data) {
             zen_window_set_ready(a->shell, TRUE);
             refresh(a); gtk_widget_grab_focus(a->canvas);
         } else if (error && error->domain == POPPLER_ERROR && error->code == POPPLER_ERROR_ENCRYPTED) {
+            zen_window_hide_progress(a->shell);
             ask_password(a, j->file);
-        } else if (error && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) notice(a, error->message);
+        } else {
+            zen_window_hide_progress(a->shell);
+            if (error && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) notice(a, error->message);
+        }
     }
     if (d) document_unref(d);
     g_clear_error(&error); g_application_release(G_APPLICATION(a->application));
@@ -580,7 +598,8 @@ static void open_file(App *a, GFile *file, const char *password) {
     g_task_set_task_data(task, j, open_job_free);
     g_application_hold(G_APPLICATION(a->application));
     g_task_run_in_thread(task, open_thread); g_object_unref(task);
-    notice(a, "Opening document…");
+    zen_window_clear_notice(a->shell);
+    zen_window_show_progress(a->shell, -1);
 }
 static void open_from_shell(ZenWindow *shell, GFile *file, gpointer data) {
     (void)shell; open_file(data, file, NULL);

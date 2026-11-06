@@ -451,8 +451,7 @@ typedef struct {
     ZenWindow *window;
     ImageCanvas *canvas;
     GtkWidget *counter, *previous, *next, *metadata, *metadata_text;
-    GtkWidget *progress, *spinner;
-    guint progress_timer, load_idle;
+    guint load_idle;
     GCancellable *listing;
     GFileMonitor *monitor;
     ImageLoad *loads[2];  /* Owned by their tasks until the completion callback. */
@@ -587,18 +586,6 @@ static void directory_ready(GObject *source, GAsyncResult *result, gpointer data
     g_clear_pointer(&files, g_ptr_array_unref); g_clear_error(&error);
 }
 
-static gboolean show_progress(gpointer data) {
-    ImageView *view = data;
-    view->progress_timer = 0;
-    gtk_widget_set_visible(view->progress, TRUE);
-    gtk_spinner_start(GTK_SPINNER(view->spinner));
-    return G_SOURCE_REMOVE;
-}
-static void hide_progress(ImageView *view) {
-    g_clear_handle_id(&view->progress_timer, g_source_remove);
-    gtk_spinner_stop(GTK_SPINNER(view->spinner));
-    gtk_widget_set_visible(view->progress, FALSE);
-}
 static void show_thumbnail(ImageView *view, GdkTexture *texture) {
     if (g_set_object(&view->canvas->thumbnail, texture)) {
         gtk_widget_queue_draw(GTK_WIDGET(view->canvas));
@@ -608,7 +595,7 @@ static void show_thumbnail(ImageView *view, GdkTexture *texture) {
 static void present_image(ImageView *view, GFile *file, Decoded *result) {
     view->waiting = FALSE;
     g_clear_handle_id(&view->load_idle, g_source_remove);
-    hide_progress(view);
+    zen_window_hide_progress(view->window);
     show_thumbnail(view, NULL);
     update_neighbors(view);
     if (view->displayed != result) {
@@ -688,7 +675,7 @@ static void load_failed(ImageView *view, GFile *file, const GError *error) {
         char *message = g_strdup_printf("%s\nUse zen-image --formats to see installed image formats.", reason);
         zen_window_notice(view->window, message); g_free(message);
     }
-    hide_progress(view);
+    zen_window_hide_progress(view->window);
 }
 
 static void decoded(GObject *source, GAsyncResult *async_result, gpointer unused) {
@@ -780,8 +767,7 @@ static void request_image(ImageView *view, GFile *file, int direction) {
         zen_window_clear_notice(view->window);
         GdkTexture *preview = entry && entry->cached ? entry->cached->fit_texture : load ? load->thumbnail : NULL;
         show_thumbnail(view, preview);
-        if (!view->progress_timer && !gtk_widget_get_visible(view->progress))
-            view->progress_timer = g_timeout_add(100, show_progress, view);
+        zen_window_show_progress(view->window, -1);
         /* Let queued key repeats settle on a target before starting disk work. */
         if (!load && !view->load_idle)
             view->load_idle = g_idle_add_full(G_PRIORITY_HIGH_IDLE, start_latest_load, view, NULL);
@@ -806,7 +792,6 @@ static void open_image(ZenWindow *window, GFile *file, gpointer user) {
 }
 static void release_view(gpointer user) {
     ImageView *view = user;
-    g_clear_handle_id(&view->progress_timer, g_source_remove);
     g_clear_handle_id(&view->load_idle, g_source_remove);
     g_clear_object(&view->listing);
     stop_monitor(view);
@@ -820,7 +805,6 @@ static gboolean closing(GtkWindow *window, gpointer user) {
     cancel_loads(view, NULL, FALSE);
     stop_monitor(view);
     g_clear_handle_id(&view->load_idle, g_source_remove);
-    hide_progress(view);
     if (view->listing) g_cancellable_cancel(view->listing);
     return FALSE;
 }
@@ -883,17 +867,6 @@ static void new_view(GtkApplication *application, GFile *file) {
 
     GtkWidget *content = gtk_overlay_new();
     gtk_overlay_set_child(GTK_OVERLAY(content), GTK_WIDGET(canvas));
-    view->progress = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    view->spinner = gtk_spinner_new();
-    gtk_box_append(GTK_BOX(view->progress), view->spinner);
-    gtk_box_append(GTK_BOX(view->progress), gtk_label_new("Opening image…"));
-    gtk_widget_add_css_class(view->progress, "toast");
-    gtk_widget_set_halign(view->progress, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(view->progress, GTK_ALIGN_END);
-    gtk_widget_set_margin_bottom(view->progress, 92);
-    gtk_widget_set_can_target(view->progress, FALSE);
-    gtk_widget_set_visible(view->progress, FALSE);
-    gtk_overlay_add_overlay(GTK_OVERLAY(content), view->progress);
     view->metadata = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(view->metadata, "image-metadata");
     gtk_widget_set_halign(view->metadata, GTK_ALIGN_END);

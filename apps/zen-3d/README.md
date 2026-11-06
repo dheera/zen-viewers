@@ -24,7 +24,7 @@ File import runs on a worker. The OpenGL renderer uploads indexed geometry in ch
 
 For a binary little-endian PLY containing float XYZ vertices and indexed triangles, the loader retains shared vertices and reads the file in blocks. It computes smooth normals without expanding every triangle into separate vertices. PLY files with colors, supplied normals, other vertex properties, polygons or another byte order use Assimp so those features are preserved.
 
-Large supported PLY files show a progress bar. When opening into an empty window, an initial point preview appears after the vertices are read, while triangle processing continues. A coarser mesh can appear during upload and camera movement. The full model returns when movement settles and upload is complete. The details panel reports the full geometry counts after loading. Preview availability depends on the mesh and available memory.
+Large supported PLY files show a progress ring during reading and upload. When opening into an empty window, an initial point preview appears after the vertices are read, while triangle processing continues. A coarser mesh can appear during upload and camera movement. The full model returns when movement settles and upload is complete. The details panel reports the full geometry counts after loading. Preview availability depends on the mesh and available memory.
 
 Each input file is limited to 256 MiB. Decoded geometry is limited to 512 MiB for the dedicated PLY loader and 256 MiB for the general Assimp path. Texture previews are bounded to 4 megapixels per image and 32 megapixels in total. Decoders, previews and graphics drivers can use additional memory. Missing textures fall back to the material color.
 

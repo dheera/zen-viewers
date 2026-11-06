@@ -343,6 +343,7 @@ static void loaded(GObject *source, GAsyncResult *result, gpointer unused) {
         } else if (error && !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
             zen_window_notice(r->shell, error->message);
         }
+        zen_window_hide_progress(r->shell);
     }
     md_document_free(doc);
     g_clear_error(&error);
@@ -358,7 +359,8 @@ static void open_file(ZenWindow *shell, GFile *file, gpointer data) {
     req->generation = ++r->generation;
     GTask *task = g_task_new(zen_window_get_window(shell), r->cancel, loaded, NULL);
     g_task_set_task_data(task, req, request_free);
-    zen_window_notice(shell, "Opening Markdown…");
+    zen_window_clear_notice(shell);
+    zen_window_show_progress(shell, -1);
     g_task_run_in_thread(task, load_thread);
     g_object_unref(task);
 }

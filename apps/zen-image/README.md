@@ -16,7 +16,7 @@ Open a photograph or illustration in a borderless window. The image fits the win
 
 Folder navigation uses natural filename order, placing `image2` before `image10`. It includes recognized image files in the current folder, skips files that fail to decode, and stops at either end. Zen preloads the next and previous images on worker threads and reuses their textures when you press an arrow. An unusually large neighbor keeps a smaller preview within the cache budget. When the filesystem reports an edit, Zen invalidates the affected cached image. Reopen an image to refresh the folder listing and cache.
 
-On a cache miss, Zen shows a valid desktop thumbnail while decoding if one is available. Otherwise, it holds the current image until the next one is ready. A small loading indicator appears if the switch takes more than a moment. Rapid navigation gives priority to the latest selection.
+On a cache miss, Zen shows a valid desktop thumbnail while decoding if one is available. Otherwise, it holds the current image until the next one is ready. A translucent ring appears in the lower-right corner on slower loads. Rapid navigation gives priority to the latest selection.
 
 The app uses the system’s GdkPixbuf loaders. Common formats include PNG, JPEG, GIF, BMP, TIFF and ICO. Run `zen-image --formats` to see the actual formats available on your machine. These Ubuntu packages add more image formats.
 
