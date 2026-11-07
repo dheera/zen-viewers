@@ -4,11 +4,11 @@ set -euo pipefail
 root=$(cd -- "$(dirname -- "$0")/.." && pwd)
 version=$(cat "$root/VERSION")-1
 arch=$(dpkg --print-architecture)
-apps=(zen-pdf zen-image zen-markdown zen-3d zen-video zen-books)
+apps=(zen-pdf zen-image zen-markdown zen-3d zen-video zen-books zen-font zen-table zen-map)
 meta=true
 if (( $# )); then
-    if [[ $# != 2 || $1 != --app || ! $2 =~ ^zen-(pdf|image|markdown|3d|video|books)$ ]]; then
-        echo "Usage: $0 [--app zen-pdf|zen-image|zen-markdown|zen-3d|zen-video|zen-books]" >&2; exit 2
+    if [[ $# != 2 || $1 != --app || " ${apps[*]} " != *" $2 "* ]]; then
+        printf 'Usage: %s [--app APP]\nApps: %s\n' "$0" "${apps[*]}" >&2; exit 2
     fi
     apps=("$2"); meta=false
 fi
@@ -25,6 +25,10 @@ for app in "${apps[@]}"; do
     cp -r "$root/apps/$app/data" "source/apps/$app/"
     if [[ $app == zen-image ]]; then cp "$root/apps/$app/"{main.c,thumbnail.h,raw.h} "source/apps/$app/"
     else cp -r "$root/apps/$app/src" "source/apps/$app/"; fi
+    if [[ $app == zen-table ]]; then
+        mkdir -p source/vendor
+        cp -r "$root/vendor/carquet" source/vendor/
+    fi
 done
 cat > debian/changelog <<CHANGELOG
 zen-viewers ($version) unstable; urgency=medium
@@ -55,6 +59,10 @@ finish_package() {
     mkdir -p "$stage/DEBIAN" "$stage/usr/share/doc/$app"
     install -m644 "$root/LICENSE" "$stage/usr/share/doc/$app/copyright"
     ln -s copyright "$stage/usr/share/doc/$app/LICENSE"
+    if [[ $app == zen-table ]]; then
+        install -m644 "$root/vendor/carquet/LICENSE" "$stage/usr/share/doc/$app/LICENSE.carquet"
+        install -m644 "$root/vendor/carquet/SNAPPY-NOTICE" "$stage/usr/share/doc/$app/NOTICE.snappy"
+    fi
     if [[ -e $docs ]]; then install -m644 "$docs" "$stage/usr/share/doc/$app/README.md"; fi
     gzip -n -9 -c debian/changelog > "$stage/usr/share/doc/$app/changelog.Debian.gz"
     cat > "$stage/DEBIAN/control" <<CONTROL
@@ -82,6 +90,9 @@ for app in "${apps[@]}"; do
     zen-image)    source/build/$app --version; summary="Borderless image viewer with folder navigation and metadata" ;;
     zen-markdown) source/build/$app --self-test; summary="Borderless Markdown reader with formatted tables and selectable text" ;;
     zen-video)    source/build/$app --version; summary="Borderless video player with native playback controls" ;;
+    zen-font)     source/build/$app --version; summary="Font specimen and glyph viewer with variable font controls" ;;
+    zen-table)    source/build/$app --version; summary="CSV, TSV and Parquet table viewer" ;;
+    zen-map)      source/build/$app --version; summary="GPX, KML and GeoJSON viewer with live OpenStreetMap tiles" ;;
     zen-books)
         source/build/$app --version
         if [[ -e $root/examples/above-the-fog.epub ]]; then source/build/$app --inspect "$root/examples/above-the-fog.epub" >/dev/null; fi
@@ -97,11 +108,18 @@ for app in "${apps[@]}"; do
     substvars=$(dpkg-shlibdeps -O "debian/$app/usr/bin/$app")
     depends=$(sed -n 's/^shlibs:Depends=//p' <<< "$substvars")
     if [[ -z $depends ]]; then echo "Missing runtime dependencies for $app" >&2; exit 1; fi
+    case $app in
+        zen-table) depends+=", tzdata" ;;
+        zen-map) depends+=", ca-certificates" ;;
+    esac
     finish_package "$app" "$arch" "$depends" "$summary" "$root/apps/$app/README.md"
 done
 if $meta; then
-    finish_package zen-viewers all "zen-pdf (= $version), zen-image (= $version), zen-markdown (= $version), zen-3d (= $version), zen-video (= $version), zen-books (= $version)" \
-        "Install the Zen PDF, image, Markdown, 3D, video and book viewers" "$root/README.md"
+    dependencies=()
+    for app in "${apps[@]}"; do dependencies+=("$app (= $version)"); done
+    depends=$(printf '%s, ' "${dependencies[@]}")
+    finish_package zen-viewers all "${depends%, }" \
+        "Install the Zen Viewers suite" "$root/README.md"
 fi
 mkdir -p "$root/dist"
 install -m644 "$tmp"/packages/*.deb "$root/dist/"

@@ -12,7 +12,7 @@ trap 'rm -rf -- "$tmp"' EXIT
 top="$tmp/rpmbuild"
 name="zen-viewers-$version"
 mkdir -p "$top"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} "$tmp/$name"
-files=(Makefile VERSION LICENSE common apps scripts packaging tests)
+files=(Makefile VERSION LICENSE common apps scripts packaging tests vendor)
 for item in README.md examples previews; do
     if [[ -e $root/$item ]]; then files+=("$item"); fi
 done

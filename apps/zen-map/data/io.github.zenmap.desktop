@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Zen Map
+Comment=Explore maps and tracks with a quiet, modern interface
+Exec=zen-map %F
+Icon=io.github.zenmap
+Terminal=false
+Categories=Science;Geography;Viewer;GTK;
+MimeType=application/gpx+xml;application/vnd.google-earth.kml+xml;application/geo+json;
+StartupNotify=true

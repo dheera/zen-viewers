@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Zen Font
+GenericName=Font Viewer
+Comment=Give type room to breathe: preview, explore and compare font variations
+Exec=zen-font %F
+Icon=io.github.zenviewers.Font
+Terminal=false
+Categories=Graphics;Viewer;
+MimeType=font/ttf;font/otf;font/collection;font/woff;font/woff2;application/x-font-ttf;application/x-font-otf;
+StartupNotify=true

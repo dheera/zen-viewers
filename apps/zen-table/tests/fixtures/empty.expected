@@ -1,0 +1,2 @@
+0 rows, 18 columns, Parquet
+id	name	enabled	count	ratio	binary	amount	large_amount	day	clock	instant	local_time	numbers	profile	pairs	nested	all_null	u64

@@ -1,6 +1,7 @@
 CC ?= cc
 AR ?= ar
-APPS ?= zen-pdf zen-image zen-markdown zen-3d zen-video zen-books
+VIEWERS = zen-pdf zen-image zen-markdown zen-3d zen-video zen-books zen-font zen-table zen-map
+APPS ?= $(VIEWERS)
 PREFIX ?= /usr/local
 CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -Wall -Wextra -Wformat=2 -Wstrict-prototypes
@@ -16,6 +17,14 @@ VIDEO_CFLAGS ?= $(shell pkg-config --cflags mpv epoxy)
 VIDEO_LIBS ?= $(shell pkg-config --libs mpv epoxy)
 BOOKS_CFLAGS = $(shell pkg-config --cflags libarchive libxml-2.0)
 BOOKS_LIBS = $(shell pkg-config --libs libarchive libxml-2.0)
+FONT_CFLAGS = $(shell pkg-config --cflags fontconfig freetype2 pangoft2)
+FONT_LIBS = $(shell pkg-config --libs fontconfig freetype2 pangoft2)
+MAP_CFLAGS = $(shell pkg-config --cflags libcurl libxml-2.0 json-glib-1.0)
+MAP_LIBS = $(shell pkg-config --libs libcurl libxml-2.0 json-glib-1.0)
+TABLE_CFLAGS = -Ibuild/carquet-src/include $(shell pkg-config --cflags libzstd zlib liblz4 libbrotlidec libbrotlienc)
+TABLE_LIBS = $(shell pkg-config --libs libzstd zlib liblz4 libbrotlidec libbrotlienc)
+CARQUET_ARCHIVE = vendor/carquet/carquet-0.7.3.tar.gz
+CARQUET_LIBRARY = build/carquet/libcarquet.a
 IMAGE_EXIF ?= $(shell pkg-config --exists libexif && echo yes)
 IMAGE_RAW ?= $(shell pkg-config --exists 'libraw_r >= 0.20' && echo yes || echo no)
 IMAGE_RAW_MIME = image/x-canon-cr2;image/x-canon-cr3;image/x-sony-arw;image/x-adobe-dng;image/x-nikon-nef;image/x-fuji-raf;image/x-olympus-orf;image/x-panasonic-rw2;image/x-pentax-pef;
@@ -38,6 +47,9 @@ zen-markdown: build/zen-markdown
 zen-3d: build/zen-3d
 zen-video: build/zen-video
 zen-books: build/zen-books
+zen-font: build/zen-font
+zen-table: build/zen-table
+zen-map: build/zen-map
 
 build:
 	mkdir -p build
@@ -66,14 +78,39 @@ build/zen-video: apps/zen-video/src/main.c build/libzen-ui.a common/zen-ui.h VER
 BOOKS_SRC = apps/zen-books/src/main.c apps/zen-books/src/book.c
 build/zen-books: $(BOOKS_SRC) apps/zen-books/src/book.h build/libzen-ui.a common/zen-ui.h VERSION
 	$(CC) $(CPPFLAGS) $(VERSION_FLAG) $(GTK_CFLAGS) $(BOOKS_CFLAGS) $(CFLAGS) -Icommon $(BOOKS_SRC) build/libzen-ui.a -o $@ $(LDFLAGS) $(GTK_LIBS) $(BOOKS_LIBS) -lm
+build/zen-font: apps/zen-font/src/main.c build/libzen-ui.a common/zen-ui.h VERSION
+	$(CC) $(CPPFLAGS) $(VERSION_FLAG) $(GTK_CFLAGS) $(FONT_CFLAGS) $(CFLAGS) -Icommon $< build/libzen-ui.a -o $@ $(LDFLAGS) $(GTK_LIBS) $(FONT_LIBS) -lm
+build/carquet-src/.ready: $(CARQUET_ARCHIVE) | build
+	@echo 'c4d0077170b64966429aaf8d194095008191b8730c5150185fc6fe884adc5d6d  $(CARQUET_ARCHIVE)' | sha256sum --check --status
+	mkdir -p build/carquet-src
+	tar -xzf $(CARQUET_ARCHIVE) -C build/carquet-src --strip-components=1
+	touch $@
+$(CARQUET_LIBRARY): build/carquet-src/.ready vendor/carquet/CMakeLists.txt
+	CC="$(CC)" cmake -S vendor/carquet -B build/carquet -DCARQUET_SOURCE_DIR="$(abspath build/carquet-src)" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="$(CPPFLAGS) $(CFLAGS)"
+	+cmake --build build/carquet --target carquet
+TABLE_SRC = $(addprefix apps/zen-table/src/,main.c table-data.c parquet-native.c)
+build/zen-table: $(TABLE_SRC) apps/zen-table/src/table-data.h apps/zen-table/src/parquet-native.h $(CARQUET_LIBRARY) build/libzen-ui.a common/zen-ui.h VERSION
+	$(CC) $(CPPFLAGS) $(VERSION_FLAG) $(GTK_CFLAGS) $(TABLE_CFLAGS) $(CFLAGS) -Icommon $(TABLE_SRC) build/libzen-ui.a $(CARQUET_LIBRARY) -o $@ $(LDFLAGS) $(GTK_LIBS) $(TABLE_LIBS) -lm
+MAP_SRC = $(addprefix apps/zen-map/src/,main.c map-data.c tiles.c)
+build/zen-map: $(MAP_SRC) apps/zen-map/src/map-data.h apps/zen-map/src/tiles.h build/libzen-ui.a common/zen-ui.h VERSION
+	$(CC) $(CPPFLAGS) $(VERSION_FLAG) $(GTK_CFLAGS) $(MAP_CFLAGS) $(CFLAGS) -Icommon $(MAP_SRC) build/libzen-ui.a -o $@ $(LDFLAGS) $(GTK_LIBS) $(MAP_LIBS) -lm
+build/zen-map-test: apps/zen-map/tests/test-data.c apps/zen-map/src/map-data.c apps/zen-map/src/map-data.h | build
+	$(CC) $(CPPFLAGS) $(MAP_CFLAGS) $(CFLAGS) -Iapps/zen-map/src $(filter %.c,$^) -o $@ $(LDFLAGS) $(MAP_LIBS) -lm
 
-check: all
+check: all build/zen-map-test
 	build/zen-pdf --self-test
 	build/zen-markdown --self-test
 	build/zen-3d --inspect examples/trefoil.glb >/dev/null
 	build/zen-video --version
 	build/zen-books --inspect examples/above-the-fog.epub >/dev/null
+	build/zen-font --version
+	build/zen-table --version
+	build/zen-map --version
+	build/zen-map-test
+	sh apps/zen-table/tests/data-smoke.sh build/zen-table
+check-data: all
 	python3 apps/zen-books/tests/parser-smoke.py
+	python3 apps/zen-table/tests/data-smoke.py build/zen-table
 check-ui: all
 	python3 tests/chrome-smoke.py build/zen-image
 	ZEN_PDF_BIN=$(CURDIR)/build/zen-pdf apps/zen-pdf/tests/ui-smoke.sh
@@ -86,6 +123,10 @@ check-ui: all
 	python3 apps/zen-3d/tests/ui-smoke.py build/zen-3d
 	python3 apps/zen-books/tests/ui-smoke.py build/zen-books
 	python3 apps/zen-video/tests/ui-smoke.py build/zen-video
+	python3 apps/zen-font/tests/ui-smoke.py build/zen-font
+	python3 apps/zen-table/tests/ui-smoke.py build/zen-table
+	xvfb-run -a -s '-screen 0 1280x1024x24' dbus-run-session -- python3 apps/zen-map/tests/ui-smoke.py build/zen-map
+	xvfb-run -a -s '-screen 0 1280x1024x24' dbus-run-session -- python3 apps/zen-map/tests/continuity-smoke.py build/zen-map
 install: $(BINARIES)
 	@set -e; for app in $(APPS); do \
 	  install -Dm755 build/$$app "$(DESTDIR)$(PREFIX)/bin/$$app"; \
@@ -98,11 +139,16 @@ install: $(BINARIES)
 	  if [ "$$app" = zen-image ] && [ "$(IMAGE_RAW)" = yes ]; then \
 	    install -Dm644 apps/zen-image/data/io.github.zenimage-raw.xml "$(DESTDIR)$(PREFIX)/share/mime/packages/io.github.zenimage-raw.xml"; \
 	  fi; \
+	  if [ "$$app" = zen-table ]; then \
+	    rm -f "$(DESTDIR)$(PREFIX)/libexec/zen-viewers/zen-table-parquet"; \
+	    install -Dm644 apps/zen-table/data/io.github.zenviewers.Table.xml "$(DESTDIR)$(PREFIX)/share/mime/packages/io.github.zenviewers.Table.xml"; \
+	  fi; \
 	done
 uninstall:
 	@set -e; for app in $(APPS); do \
 	  rm -f "$(DESTDIR)$(PREFIX)/bin/$$app"; \
 	  if [ "$$app" = zen-image ]; then rm -f "$(DESTDIR)$(PREFIX)/share/mime/packages/io.github.zenimage-raw.xml"; fi; \
+	  if [ "$$app" = zen-table ]; then rm -f "$(DESTDIR)$(PREFIX)/libexec/zen-viewers/zen-table-parquet" "$(DESTDIR)$(PREFIX)/share/mime/packages/io.github.zenviewers.Table.xml"; fi; \
 	  for file in apps/$$app/data/*.desktop; do rm -f "$(DESTDIR)$(PREFIX)/share/applications/$$(basename "$$file")"; done; \
 	  for file in apps/$$app/data/*.svg; do rm -f "$(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/$$(basename "$$file")"; done; \
 	done
@@ -113,4 +159,4 @@ rpm:
 	./scripts/build-rpm.sh
 clean:
 	rm -rf build
-.PHONY: all zen-pdf zen-image zen-markdown zen-3d zen-video zen-books check check-ui install uninstall deb rpm clean FORCE_IMAGE_FEATURES
+.PHONY: all $(VIEWERS) check check-data check-ui install uninstall deb rpm clean FORCE_IMAGE_FEATURES

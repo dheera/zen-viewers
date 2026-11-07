@@ -1,0 +1,36 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"name": "Headlands sketch"},
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [-122.5299, 37.8308],
+          [-122.5257, 37.8311],
+          [-122.5224, 37.8333],
+          [-122.5197, 37.8326],
+          [-122.5161, 37.8338],
+          [-122.5134, 37.8342],
+          [-122.5082, 37.8317],
+          [-122.5047, 37.8306],
+          [-122.5019, 37.8288],
+          [-122.4981, 37.8292],
+          [-122.4938, 37.8276],
+          [-122.4903, 37.8268]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "West marker"},
+      "geometry": {"type": "Point", "coordinates": [-122.5299, 37.8308]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "East marker"},
+      "geometry": {"type": "Point", "coordinates": [-122.4903, 37.8268]}
+    }
+  ]
+}

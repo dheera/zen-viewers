@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Zen Table
+GenericName=Table Viewer
+Comment=Quiet, fast browsing for CSV, TSV, and Parquet
+Exec=zen-table %F
+Icon=io.github.zenviewers.Table
+Terminal=false
+Categories=Office;Viewer;GTK;
+MimeType=text/csv;text/tab-separated-values;application/vnd.apache.parquet;
+Keywords=CSV;TSV;Parquet;data;table;
+StartupNotify=true

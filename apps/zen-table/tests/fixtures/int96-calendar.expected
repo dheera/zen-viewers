@@ -1,0 +1,11 @@
+9 rows, 2 columns, Parquet
+label	instant
+lower-day	1677-09-21 00:00:00
+upper-day	2262-04-11 23:59:59
+lower-instant	1677-09-21 00:12:43.145225000
+upper-instant	2262-04-11 23:47:16.854775000
+early-calendar	1500-01-01 00:00:00
+late-calendar	2500-01-01 00:00:00
+modern	2026-04-12 03:04:05.123456000
+pre-epoch	1969-12-31 23:59:59.500000000
+null	

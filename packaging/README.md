@@ -1,22 +1,24 @@
 # Distribution packages
 
-Each viewer has its own executable, desktop entry, icon and runtime dependency list. The **zen-viewers** metapackage installs all six apps at the same release version. The shared window code is linked into each program. Build packages on the target Linux distribution and CPU architecture.
+Each viewer has its own executable, desktop entry, icon and runtime dependency list. The **zen-viewers** metapackage installs all nine apps at the same release version. The shared window code is linked into each program. Build packages on the target Linux distribution and CPU architecture.
 
 ## Ubuntu and Debian
 
-Run these commands from the repository root to build and install all seven packages.
+Run these commands from the repository root to build and install the suite.
 
 ```sh
-sudo apt install build-essential pkg-config libgtk-4-dev libpoppler-glib-dev libcmark-gfm-dev libcmark-gfm-extensions-dev libexif-dev libraw-dev libepoxy-dev libassimp-dev libmpv-dev libarchive-dev libxml2-dev dpkg-dev
+sudo apt install build-essential cmake pkg-config libgtk-4-dev libpoppler-glib-dev libcmark-gfm-dev libcmark-gfm-extensions-dev libexif-dev libraw-dev libepoxy-dev libassimp-dev libmpv-dev libarchive-dev libxml2-dev libfontconfig-dev libfreetype-dev libcurl4-gnutls-dev libjson-glib-dev libzstd-dev zlib1g-dev liblz4-dev libbrotli-dev dpkg-dev
 ./scripts/build-deb.sh
 sudo apt install ./dist/*_"$(cat VERSION)"-1_*.deb
 ```
 
-To build just one app, use `./scripts/build-deb.sh --app zen-pdf`, `--app zen-image`, `--app zen-markdown`, `--app zen-3d`, `--app zen-video`, or `--app zen-books`. Install the corresponding local file, for example `sudo apt install ./dist/zen-3d_"$(cat VERSION)"-1_amd64.deb`. GTK 4 development headers are needed to compile all apps. PDF uses Poppler. Markdown uses cmark-gfm and its table extension. The optional libexif headers add JPEG EXIF metadata to the image viewer. Zen 3D uses libepoxy for OpenGL entry points and Assimp for model import. Zen Video uses libmpv and libepoxy. Zen Books uses libarchive and libxml2 for EPUB books and CBZ comics. The builder extracts runtime dependencies from each executable with `dpkg-shlibdeps`; Assimp is a dependency of `zen-3d` only; the existing viewers do not gain video or book libraries.
+To build one app, pass its name to `./scripts/build-deb.sh --app zen-map`. Install the corresponding local package with `sudo apt install ./dist/zen-map_"$(cat VERSION)"-1_amd64.deb` on amd64. The builder extracts linked runtime dependencies from each executable with `dpkg-shlibdeps`. See the individual build targets in the [root README](../README.md#build) for development libraries.
 
 For a standalone Zen 3D build, the development dependencies are `build-essential pkg-config libgtk-4-dev libepoxy-dev libassimp-dev`; add `dpkg-dev` to build its Debian package. `make APPS=zen-3d` builds only that executable. The existing PDF, image and Markdown packages do not gain the 3D import libraries. Installing the suite metapackage also installs Zen 3D.
 
 Zen Image enables camera RAW previews when the LibRaw development files are available. `IMAGE_RAW=no ./scripts/build-deb.sh --app zen-image` builds a package with only the system image loaders. RAW-enabled packages pick up the distribution's LibRaw runtime dependency automatically.
+
+Zen Table links the pinned Carquet C library into its executable. The source archive is included and verified by SHA-256 before extraction. System zstd, zlib, LZ4 and Brotli libraries provide compression. The installed package includes the bundled code's license notices.
 
 Shared-library ABIs can differ between distribution releases. Build each package on the release where it will be installed: a package linked to `libassimp5` needs that library, even if the target system has `libassimp6`. Similarly, Ubuntu 22.04 uses libmpv1 while newer releases may use libmpv2. The source supports Ubuntu 22.04's GTK 4.6, Assimp 5.2 and libmpv 0.34; newer distributions can build against their own development packages.
 
@@ -39,11 +41,11 @@ sudo apt install build-essential pkg-config libgtk-4-dev libarchive-dev libxml2-
 Install the build tools on Fedora and run the RPM builder.
 
 ```sh
-sudo dnf install gcc gcc-c++ make cmake curl python3 pkgconf-pkg-config gtk4-devel poppler-glib-devel libexif-devel LibRaw-devel libepoxy-devel assimp-devel mpv-devel libarchive-devel libxml2-devel rpm-build
+sudo dnf install gcc gcc-c++ make cmake curl pkgconf-pkg-config gtk4-devel poppler-glib-devel libexif-devel LibRaw-devel libepoxy-devel assimp-devel mpv-devel libarchive-devel libxml2-devel fontconfig-devel freetype-devel libcurl-devel json-glib-devel libzstd-devel zlib-devel lz4-devel brotli-devel rpm-build
 ./scripts/build-rpm.sh
 ```
 
-The output includes binary packages for all six apps, a metapackage and the source RPM. Install one app by its generated filename, for example `sudo dnf install ./dist/zen-3d-"$(cat VERSION)"-1*.x86_64.rpm`. Each binary package has its own automatic shared-library dependencies. To install the metapackage from local files, supply the matching zen-viewers, zen-pdf, zen-image, zen-markdown, zen-3d, zen-video and zen-books binary RPMs together.
+The output includes binary packages for all nine apps, a metapackage and the source RPM. Install one app by its generated filename, for example `sudo dnf install ./dist/zen-font-"$(cat VERSION)"-1*.x86_64.rpm`. Each binary package has its own automatic shared-library dependencies. To install the metapackage from local files, supply it and the nine matching viewer RPMs together.
 
 When rebuilding the source RPM directly, `rpmbuild --without raw` disables camera RAW previews in Zen Image.
 
